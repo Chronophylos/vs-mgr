@@ -65,9 +65,11 @@ def main():
     # Initialize interfaces and components
     components = initialize_components(console_mgr, settings, dry_run)
 
-    # Check dependencies
-    if not check_dependencies(components["system"], console_mgr):
-        return 1
+    # Check dependencies only if a command is provided
+    # (argparse handles exit for -h/--help before this)
+    if args.command is not None:
+        if not check_dependencies(components["system"], console_mgr):
+            return 1
 
     # Set up signal handlers
     setup_signal_handlers(components.get("update_mgr"))
@@ -201,9 +203,11 @@ def process_command(args, components, settings):
         console.exception(f"An unexpected error occurred: {e}")
         result = 1
     finally:
-        console.info("Performing final cleanup...")
-        if "update_mgr" in components:
-            components["update_mgr"]._cleanup()
+        # Perform cleanup only if a command was actually processed (not just help shown)
+        if args.command is not None:
+            console.info("Performing final cleanup...")
+            if "update_mgr" in components:
+                components["update_mgr"]._cleanup()
 
     return result
 
