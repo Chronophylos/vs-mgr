@@ -8,6 +8,7 @@ import requests
 
 # Import our modules
 from config import ConfigManager, ServerSettings
+from errors import ConfigError, DependencyError, VSManagerError
 from ui import ConsoleManager
 from system import SystemInterface
 from services import ServiceManager
@@ -24,7 +25,7 @@ from compressor import ZstdCompressor
 
 
 def main():
-    # Initialize core components
+    # Initialize Console Manager FIRST, but without log dir yet
     console_mgr = ConsoleManager()
 
     # Set up argument parser
@@ -91,20 +92,29 @@ def main():
 
     # Handle --dry-run
     dry_run = args.dry_run
-    console_mgr = ConsoleManager(dry_run=dry_run)
+    console_mgr.dry_run = dry_run
+
+    # Initialize Config Manager AFTER console manager
     config_mgr = ConfigManager(console=console_mgr)
 
-    # Load configuration
-    settings = config_mgr.load_config()
-
-    # Update console with log directory
-    console_mgr.log_dir = settings.log_dir
-    console_mgr.setup_logging()
-
-    # Handle --generate-config
+    # Handle --generate-config before loading settings or setting up full logging
     if args.generate_config:
         config_mgr.generate_config_file()
+        console_mgr.info("Sample configuration file generated. Exiting.")
         return 0
+
+    # Load configuration
+    try:
+        settings = config_mgr.load_config()
+    except ConfigError as e:
+        console_mgr.critical(f"Failed to load configuration: {e}")
+        return 1
+    except VSManagerError as e:
+        console_mgr.critical(f"An unexpected error occurred during configuration: {e}")
+        return 1
+
+    # Now setup full logging with the directory from settings
+    console_mgr.setup_logging(log_dir=settings.log_dir)
 
     # Initialize interfaces
     process_runner = SubprocessProcessRunner()
@@ -130,8 +140,8 @@ def main():
 
     version_checker = VersionChecker(
         server_dir=settings.server_dir,
-        system_interface=system,
         http_client=http_client,
+        process_runner=process_runner,
         console=console_mgr,
     )
 
@@ -162,8 +172,9 @@ def main():
 
     # Set up signal handlers for cleanup
     def signal_handler(sig, frame):
-        console_mgr.print("Received interrupt signal, cleaning up...", style="yellow")
-        update_mgr.cleanup()
+        console_mgr.warning("Received interrupt signal, attempting cleanup...")
+        if "update_mgr" in locals():
+            update_mgr.cleanup()
         sys.exit(1)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -206,19 +217,21 @@ def main():
             result = 0
 
         else:
-            console_mgr.print(f"Unknown command: {args.command}", style="red")
+            console_mgr.error(f"Unknown command: {args.command}")
             parser.print_help()
             result = 1
 
+    except VSManagerError as e:
+        console_mgr.error(f"Operation failed: {e}", exc_info=False)
+        result = 1
     except Exception as e:
-        console_mgr.log_message("ERROR", f"An unexpected error occurred: {e}")
-        import traceback
-
-        console_mgr.log_message("ERROR", traceback.format_exc())
+        console_mgr.exception(f"An unexpected error occurred: {e}")
         result = 1
 
     finally:
-        update_mgr.cleanup()
+        console_mgr.info("Performing final cleanup...")
+        if "update_mgr" in locals():
+            update_mgr.cleanup()
 
     return result
 
@@ -228,95 +241,35 @@ def check_dependencies(system: SystemInterface, console: ConsoleManager) -> bool
     critical_deps = ["wget", "tar", "systemctl"]
     recommended_deps = ["rsync"]
     opt_deps = ["dotnet", "jq"]
-    missing_deps = []
+    missing_critical = []
+    missing_recommended = []
 
-    console.print("Checking for required dependencies...", style="cyan")
+    console.info("Checking dependencies...")
 
     # Check for critical dependencies
     for dep in critical_deps:
         if system.which(dep) is None:
-            missing_deps.append(dep)
+            missing_critical.append(dep)
 
-    if missing_deps:
-        console.print(
-            f"Error: Missing required dependencies: {', '.join(missing_deps)}",
-            style="red",
+    if missing_critical:
+        console.critical(
+            f"Missing critical dependencies: {', '.join(missing_critical)}. Please install them and retry."
         )
-        console.print(
-            "Please install these dependencies before running this script.",
-            style="yellow",
+        raise DependencyError(
+            f"Missing critical dependencies: {', '.join(missing_critical)}"
         )
-        return False
-
-    # Check for zstd specifically for backups
-    if system.which("zstd") is None:
-        console.print(
-            "Warning: 'zstd' is not installed. Backup functionality may be limited.",
-            style="yellow",
-        )
-        # For Python implementation, we'll use the zstandard module instead
 
     # Check for recommended dependencies
     for dep in recommended_deps:
-        if dep == "rsync" and system.which(dep) is not None:
-            system.rsync_available = True
-            console.print(
-                "✓ rsync is available (recommended for safer updates)",
-                style="green",
-            )
-        elif dep == "rsync":
-            system.rsync_available = False
-            console.print("⚠ IMPORTANT: rsync is not installed!", style="red")
-            console.print(
-                "  Server updates will use a fallback method that is LESS SAFE and could potentially cause data loss.",
-                style="red",
-            )
-            console.print(
-                "  It is STRONGLY RECOMMENDED to install rsync before proceeding with updates.",
-                style="red",
-            )
-            console.print(
-                "  On most systems, you can install it with: apt install rsync (Debian/Ubuntu) or yum install rsync (RHEL/CentOS)",
-                style="yellow",
-            )
-
-            # Prompt for confirmation if not in dry-run mode
-            if not system.dry_run:
-                console.print(
-                    "Do you want to continue without rsync? (y/N)", style="yellow"
-                )
-                response = input().lower()
-                if response not in ("y", "yes"):
-                    console.print(
-                        "Exiting. Please install rsync and try again.", style="cyan"
-                    )
-                    return False
-                console.print(
-                    "Proceeding without rsync (not recommended)...", style="yellow"
-                )
-
-    # Check for optional dependencies
-    for dep in opt_deps:
         if system.which(dep) is None:
-            console.print(
-                f"Note: Optional dependency '{dep}' not found.", style="yellow"
-            )
-            if dep == "dotnet":
-                console.print(
-                    "  Some version checking features will be limited.",
-                    style="yellow",
-                )
-                console.print(
-                    "  Consider installing dotnet for direct version verification.",
-                    style="yellow",
-                )
-            elif dep == "jq":
-                console.print(
-                    "  JSON parsing for version checks will use Python methods.",
-                    style="yellow",
-                )
+            missing_recommended.append(dep)
 
-    console.print("All required dependencies are available.", style="green")
+    if missing_recommended:
+        console.warning(
+            f"Missing recommended dependencies: {', '.join(missing_recommended)}. Some features might be slower or unavailable (e.g., rsync for updates)."
+        )
+
+    console.info("Dependency check passed.")
     return True
 
 
@@ -328,6 +281,7 @@ def cmd_info(
     detailed: bool = False,
 ) -> int:
     """Display information about the current installation"""
+    console.info("Gathering server information...")
     console.print("=== Vintage Story Server Information ===", style="green")
 
     # Check server status
@@ -415,12 +369,10 @@ def _display_detailed_info(
             console.print("Backup dir size:    N/A")
 
     # Service status
-    _display_service_status(console, service_mgr, settings.service_name)
+    _display_service_status(console, settings.service_name)
 
 
-def _display_service_status(
-    console: ConsoleManager, service_mgr: ServiceManager, service_name: str
-):
+def _display_service_status(console: ConsoleManager, service_name: str):
     """Display the status of the server service"""
     console.print(f"\n--- Service Status ({service_name}) ---", style="cyan")
     try:
@@ -446,6 +398,7 @@ def cmd_check_version(
     console: ConsoleManager, version_checker: VersionChecker, channel: str = "stable"
 ) -> int:
     """Check if a new version of Vintage Story is available"""
+    console.info(f"Checking for latest version on channel '{channel}'...")
     console.print("=== Vintage Story Version Check ===", style="green")
     console.print(
         f"Checking for latest available version in the {channel} channel...",

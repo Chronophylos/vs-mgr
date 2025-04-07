@@ -1,10 +1,28 @@
 import os
-import requests
-import tarfile
 import datetime
-from typing import Optional, Tuple
+import time
+import shutil
+from typing import Optional, Tuple, TYPE_CHECKING
 
-from interfaces import IHttpClient, IFileSystem, IArchiver
+from interfaces import IHttpClient, IFileSystem, IArchiver, IProcessRunner
+from errors import (
+    UpdateError,
+    BackupError,
+    ServiceError,
+    VersioningError,
+    DownloadError,
+    FileSystemError,
+    ProcessError,
+    DependencyError,
+)
+
+if TYPE_CHECKING:
+    from system import SystemInterface
+    from services import ServiceManager
+    from backup import BackupManager
+    from versioning import VersionChecker
+    from ui import ConsoleManager
+    from config import ServerSettings
 
 
 class UpdateManager:
@@ -12,30 +30,31 @@ class UpdateManager:
 
     def __init__(
         self,
-        system_interface,
-        service_manager=None,
-        backup_manager=None,
-        version_checker=None,
-        http_client: Optional[IHttpClient] = None,
-        filesystem: Optional[IFileSystem] = None,
-        archiver: Optional[IArchiver] = None,
-        console=None,
-        settings=None,
+        service_manager: "ServiceManager",
+        backup_manager: "BackupManager",
+        version_checker: "VersionChecker",
+        http_client: IHttpClient,
+        filesystem: IFileSystem,
+        archiver: IArchiver,
+        console: "ConsoleManager",
+        settings: "ServerSettings",
+        process_runner: Optional[IProcessRunner] = None,
+        system_interface: Optional["SystemInterface"] = None,
     ):
         """Initialize UpdateManager
 
         Args:
-            system_interface: SystemInterface instance for system operations
-            service_manager: ServiceManager instance for service operations (optional)
-            backup_manager: BackupManager instance for backup operations (optional)
-            version_checker: VersionChecker instance for version checking (optional)
+            service_manager: ServiceManager instance for service operations
+            backup_manager: BackupManager instance for backup operations
+            version_checker: VersionChecker instance for version checking
             http_client: IHttpClient implementation for HTTP operations
             filesystem: IFileSystem implementation for filesystem operations
             archiver: IArchiver implementation for archive operations
-            console: ConsoleManager instance for output (optional)
-            settings: ServerSettings instance with configuration (optional)
+            console: ConsoleManager instance for output
+            settings: ServerSettings instance with configuration
+            process_runner: Optional IProcessRunner for rsync
+            system_interface: Optional SystemInterface for dry_run and rsync check
         """
-        self.system = system_interface
         self.service_mgr = service_manager
         self.backup_mgr = backup_manager
         self.version_checker = version_checker
@@ -43,6 +62,9 @@ class UpdateManager:
         self.filesystem = filesystem
         self.archiver = archiver
         self.console = console
+        self.settings = settings
+        self.process_runner = process_runner
+        self.dry_run = getattr(system_interface, "dry_run", False)
 
         # Set defaults from settings if provided, or use hardcoded defaults
         if settings:
@@ -64,6 +86,16 @@ class UpdateManager:
         self.server_stopped = False
         self.archive_name = ""
 
+        # Determine rsync availability
+        self.rsync_available = False
+        if self.process_runner and shutil.which("rsync"):
+            self.rsync_available = True
+            self.console.debug("rsync command is available.")
+        else:
+            self.console.debug(
+                "rsync command is not available or process_runner not provided."
+            )
+
     def perform_update(
         self,
         new_version: str,
@@ -80,831 +112,588 @@ class UpdateManager:
         Returns:
             tuple: (success, backup_file_path)
         """
-        download_url = (
-            f"{self.downloads_base_url}/stable/vs_server_linux-x64_{new_version}.tar.gz"
-        )
-        self.archive_name = f"vs_server_linux-x64_{new_version}.tar.gz"
+        backup_file_path: Optional[str] = None
+        success = False
+        start_time = time.time()
 
-        self._display_update_intro(new_version)
-
-        # Verify service and URL
-        if not self._verify_service_and_url(new_version, download_url):
-            return False, None
-
-        # Stop the server
-        if not self._stop_server():
-            return False, None
-
-        # Create backup if requested
-        backup_file = self._handle_backup(skip_backup, ignore_backup_failure)
-        if backup_file is None and not skip_backup and not ignore_backup_failure:
-            return False, None
-
-        # Download and extract server files
-        if not self._download_and_extract_files(download_url):
-            return False, None
-
-        # Update server files
-        if not self._update_server_files():
-            return False, None
-
-        # Start server and verify
-        if not self._start_and_verify_server(new_version):
-            return False, None
-
-        # Convert empty string to None for consistency
-        backup_result = backup_file if backup_file else None
-        self._display_update_completion(
-            new_version, backup_result, skip_backup, ignore_backup_failure
-        )
-        return True, backup_result
-
-    def _display_update_intro(self, new_version: str) -> None:
-        """Display initial update information
-
-        Args:
-            new_version: Version being updated to
-        """
-        if self.console:
-            self.console.print("=== Vintage Story Server Update ===", style="green")
-            self.console.log_message(
-                "INFO", f"Starting update to version {new_version}"
+        try:
+            self.console.info(
+                f"=== Starting Vintage Story Server Update to {new_version} ==="
             )
+            if self.dry_run:
+                self.console.info("DRY RUN MODE ENABLED - No changes will be made.")
 
-            if self.system.dry_run:
-                self.console.print(
-                    "[DRY RUN MODE] Simulating update without making changes",
-                    style="blue",
+            # 1. Preliminary Checks (Service exists, URL valid)
+            download_url = self.version_checker.build_download_url(new_version)
+            self._verify_service_and_url(new_version, download_url)
+
+            # 2. Stop Server
+            self._stop_server()
+
+            # 3. Backup Server Data
+            backup_file_path = self._handle_backup(skip_backup, ignore_backup_failure)
+
+            # 4. Download & Extract Update Archive
+            self._ensure_temp_dir()
+            self.archive_name = f"vs_server_linux-x64_{new_version}.tar.gz"
+            self._download_server_archive(download_url)
+            self._extract_server_archive()
+
+            # 5. Update Server Files (rsync or fallback)
+            self._update_server_files()
+
+            # 6. Start Server & Verify Version
+            self._start_and_verify_server(new_version)
+
+            success = True
+            self.console.info("=== Update Process Completed Successfully ===")
+
+        except (
+            UpdateError,
+            ServiceError,
+            BackupError,
+            VersioningError,
+            DownloadError,
+            FileSystemError,
+            ProcessError,
+            DependencyError,
+        ) as e:
+            self.console.error(f"Update failed: {e}", exc_info=False)
+            self.console.error("=== Update Process Failed ===")
+            success = False
+        except Exception as e:
+            self.console.exception(f"An unexpected error occurred during update: {e}")
+            self.console.error("=== Update Process Failed (Unexpected Error) ===")
+            success = False
+        finally:
+            # 7. Cleanup
+            self.cleanup()
+            end_time = time.time()
+            duration = end_time - start_time
+            self.console.info(f"Update process finished in {duration:.2f} seconds.")
+
+        return success, backup_file_path
+
+    def _ensure_temp_dir(self):
+        """Ensure the temporary directory exists"""
+        self.console.debug(f"Ensuring temporary directory exists: {self.temp_dir}")
+        try:
+            self.filesystem.mkdir(self.temp_dir, exist_ok=True)
+            # Attempt ownership change, warn on failure
+            try:
+                self.filesystem.chown(self.temp_dir, self.server_user, self.server_user)
+            except Exception as chown_err:
+                self.console.warning(
+                    f"Could not set ownership on temp directory '{self.temp_dir}': {chown_err}"
                 )
-                self.console.log_message(
-                    "INFO", "Running in dry-run mode (simulation only)"
-                )
+        except FileSystemError as e:
+            raise UpdateError(
+                f"Failed to create or access temporary directory '{self.temp_dir}': {e}"
+            ) from e
 
-            self.console.print(f"Target version:   {new_version}", style="cyan")
-            self.console.print(f"Server directory: {self.server_dir}", style="cyan")
-            self.console.print(f"Data directory:   {self.data_dir}", style="cyan")
-
-    def _verify_service_and_url(self, new_version: str, download_url: str) -> bool:
-        """Verify that the service exists and the download URL is accessible
-
-        Args:
-            new_version: Version being updated to
-            download_url: URL to download the server files from
-
-        Returns:
-            bool: True if the service exists and the URL is accessible, False otherwise
-        """
+    def _verify_service_and_url(self, new_version: str, download_url: str) -> None:
+        """Verify that the service exists and the download URL is accessible"""
+        self.console.info("Performing preliminary checks...")
         # Check service existence
-        if self.service_mgr and not self.service_mgr.check_service_exists(
-            self.service_name
-        ):
-            if self.console:
-                self.console.print(
-                    f"Error: Service {self.service_name} does not exist. Please check the service name.",
-                    style="red",
-                )
-                self.console.log_message(
-                    "ERROR", f"Service {self.service_name} does not exist."
-                )
-            return False
-
-        if self.console:
-            self.console.log_message("INFO", f"Service {self.service_name} exists.")
+        service_status = self.service_mgr.get_service_status(self.service_name)
+        if service_status == "not-found":
+            raise ServiceError(
+                f"Service '{self.service_name}' does not exist. Check configuration."
+            )
+        elif service_status == "error":
+            raise ServiceError(
+                f"Could not determine status for service '{self.service_name}'."
+            )
+        else:
+            self.console.debug(
+                f"Service '{self.service_name}' found (Status: {service_status})."
+            )
 
         # Verify download URL
-        if self.console:
-            self.console.print(f"Verifying download URL: {download_url}", style="cyan")
-        try:
-            if self.http_client:
-                response = self.http_client.head(download_url)
-                if response.status_code != 200:
-                    if self.console:
-                        self.console.print(
-                            "Error: Could not access download URL.", style="red"
-                        )
-                        self.console.print(
-                            f"Check the version number ('{new_version}') and network connection.",
-                            style="red",
-                        )
-                        self.console.log_message(
-                            "ERROR", f"Failed to verify download URL: {download_url}"
-                        )
-                    return False
-            else:
-                response = requests.head(download_url, timeout=10)
-                if response.status_code != 200:
-                    if self.console:
-                        self.console.print(
-                            "Error: Could not access download URL.", style="red"
-                        )
-                        self.console.print(
-                            f"Check the version number ('{new_version}') and network connection.",
-                            style="red",
-                        )
-                        self.console.log_message(
-                            "ERROR", f"Failed to verify download URL: {download_url}"
-                        )
-                    return False
-        except Exception as e:
-            if self.console:
-                self.console.print(f"Error verifying download URL: {e}", style="red")
-                self.console.log_message(
-                    "ERROR", f"Failed to verify download URL: {download_url}"
-                )
-            return False
-
-        if self.console:
-            self.console.print("Download URL verified.", style="green")
-            self.console.log_message("INFO", f"Download URL verified: {download_url}")
-        return True
-
-    def _stop_server(self) -> bool:
-        """Stop the server service
-
-        Returns:
-            bool: True if the server was stopped successfully, False otherwise
-        """
-        if self.console:
-            self.console.print(
-                f"Stopping server ({self.service_name})...", style="cyan"
+        self.console.info(f"Verifying download URL for version {new_version}...")
+        if not self.version_checker._verify_download_url(download_url):
+            raise VersioningError(
+                f"Download URL verification failed for {download_url}. Check version number and network."
             )
-        if not self.service_mgr or not self.service_mgr.run_systemctl(
-            "stop", self.service_name
-        ):
-            if self.console:
-                self.console.print(
-                    "Error: Failed to stop the server service.", style="red"
-                )
-                self.console.print(
-                    f"Check service status: systemctl status {self.service_name}.service",
-                    style="yellow",
-                )
-                self.console.log_message(
-                    "ERROR", f"Failed to stop server service {self.service_name}"
-                )
-            return False
 
-        self.server_stopped = (
-            True  # Mark that we stopped the server (for cleanup logic)
-        )
-        if self.console:
-            self.console.print("Server stopped.", style="green")
-        return True
+        self.console.info("Preliminary checks passed.")
+
+    def _stop_server(self) -> None:
+        """Stop the server service"""
+        self.console.info(f"Stopping server service: {self.service_name}...")
+        try:
+            self.service_mgr.run_systemctl("stop", self.service_name)
+            self.server_stopped = True
+            # Optional: Add a short delay or check status to confirm stop
+            time.sleep(2)
+            if self.service_mgr.is_service_active(self.service_name):
+                self.console.warning(
+                    f"Service '{self.service_name}' still reported as active after stop command."
+                )
+            else:
+                self.console.info(
+                    f"Service '{self.service_name}' stopped successfully."
+                )
+        except ServiceError as e:
+            raise ServiceError(
+                f"Failed to stop service '{self.service_name}': {e}"
+            ) from e
+        except Exception as e:
+            raise ServiceError(
+                f"Unexpected error stopping service '{self.service_name}': {e}"
+            ) from e
 
     def _handle_backup(
         self, skip_backup: bool, ignore_backup_failure: bool
     ) -> Optional[str]:
-        """Handle the backup process according to settings
-
-        Args:
-            skip_backup: Whether to skip creating a backup
-            ignore_backup_failure: Whether to ignore backup failures
-
-        Returns:
-            Optional[str]: Path to the created backup file or None if skipped or failed
-        """
-        backup_file = ""
+        """Handle the backup process according to settings"""
         if skip_backup:
-            if self.console:
-                self.console.print("Skipping backup as requested.", style="yellow")
-                self.console.log_message(
-                    "INFO", "Backup creation skipped as requested (--skip-backup)"
-                )
-            return backup_file
-
-        if not self.backup_mgr:
-            if self.console:
-                self.console.print(
-                    "No backup manager available. Skipping backup.", style="yellow"
-                )
-            return backup_file
-
-        backup_result = self.backup_mgr.create_backup(ignore_backup_failure)
-        if backup_result is None and not ignore_backup_failure:
-            # Backup failed and ignore_failure is false
-            if self.console:
-                self.console.print("Update aborted due to backup failure.", style="red")
-                self.console.log_message(
-                    "ERROR", "Update aborted: backup creation failed"
-                )
+            self.console.info("Skipping backup (--skip-backup specified).")
             return None
 
-        backup_file = backup_result if backup_result else ""
-        if backup_file:
-            if self.console:
-                self.console.print("Backup step completed successfully.", style="green")
-                self.console.log_message(
-                    "INFO", f"Backup created successfully at {backup_file}"
-                )
-        elif ignore_backup_failure:
-            if self.console:
-                self.console.print(
-                    "Backup failed, but continuing as --ignore-backup-failure was specified.",
-                    style="yellow",
-                )
-                self.console.log_message(
-                    "WARNING",
-                    "Backup creation failed but continuing (--ignore-backup-failure)",
-                )
-
-        return backup_file
-
-    def _download_and_extract_files(self, download_url: str) -> bool:
-        """Download and extract the server files
-
-        Args:
-            download_url: URL to download the server files from
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        # Download the server archive
-        if not self._download_server_archive(download_url):
-            return False
-
-        # Extract files
-        if not self._extract_server_archive():
-            return False
-
-        # Sanity check before modifying the server directory
-        if (
-            not self.system.is_dir(self.server_dir)
-            or not self.server_dir
-            or self.server_dir == "/"
-        ):
-            if self.console:
-                self.console.print(
-                    f"CRITICAL ERROR: Invalid SERVER_DIR defined: '{self.server_dir}'. Aborting update to prevent data loss.",
-                    style="red",
-                )
-            return False
-
-        return True
-
-    def _download_server_archive(self, download_url: str) -> bool:
-        """Download the server archive
-
-        Args:
-            download_url: URL to download the archive from
-
-        Returns:
-            bool: True if the download was successful, False otherwise
-        """
-        if self.console:
-            self.console.print(f"Downloading server archive...", style="cyan")
-            self.console.log_message(
-                "INFO", f"Downloading server archive from: {download_url}"
-            )
-
-        # Create temp directory if it doesn't exist
-        if self.filesystem:
-            self.filesystem.mkdir(self.temp_dir, exist_ok=True)
-        else:
-            self.system.run_mkdir(self.temp_dir)
-
-        target_file = os.path.join(self.temp_dir, self.archive_name)
-
-        if self.system.dry_run:
-            if self.console:
-                self.console.print(
-                    f"[DRY RUN] Would download server archive to: {target_file}",
-                    style="blue",
-                )
-            return True
-
+        self.console.info("Starting server data backup...")
         try:
-            if self.http_client:
-                success = self.http_client.download(download_url, target_file)
-                if not success:
-                    if self.console:
-                        self.console.print(
-                            f"Error: Failed to download server archive.", style="red"
-                        )
-                    return False
+            backup_file_path = self.backup_mgr.create_backup(
+                ignore_failure=ignore_backup_failure
+            )
+            if backup_file_path:
+                self.console.info(f"Backup completed successfully: {backup_file_path}")
+                return backup_file_path
+            elif ignore_backup_failure:
+                self.console.warning(
+                    "Backup failed, but failure is ignored (--ignore-backup-failure specified)."
+                )
+                return None
             else:
-                response = requests.get(download_url, stream=True, timeout=300)
-                if response.status_code != 200:
-                    if self.console:
-                        self.console.print(
-                            f"Error: Download failed with status code {response.status_code}",
-                            style="red",
-                        )
-                    return False
-
-                with open(target_file, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-
-            if self.console:
-                self.console.print(f"Download completed: {target_file}", style="green")
-                self.console.log_message(
-                    "INFO", f"Server archive downloaded to: {target_file}"
+                # This case should ideally be handled by create_backup raising an error
+                # But we include it for robustness
+                raise BackupError(
+                    "Backup process failed (and failure was not ignored). See previous logs for details."
                 )
-            return True
+        except BackupError as e:
+            # If create_backup raises BackupError and ignore_backup_failure is False
+            self.console.error(f"Backup failed: {e}")
+            raise
         except Exception as e:
-            if self.console:
-                self.console.print(
-                    f"Error downloading server archive: {e}", style="red"
+            # Catch unexpected errors during backup handling
+            self.console.error(f"Unexpected error during backup: {e}", exc_info=True)
+            if ignore_backup_failure:
+                self.console.warning(
+                    "Continuing update despite unexpected backup error (--ignore-backup-failure specified)."
                 )
-                self.console.log_message(
-                    "ERROR", f"Failed to download server archive: {e}"
-                )
-            return False
-
-    def _extract_server_archive(self) -> bool:
-        """Extract the server archive
-
-        Returns:
-            bool: True if the extraction was successful, False otherwise
-        """
-        archive_path = os.path.join(self.temp_dir, self.archive_name)
-        extract_dir = os.path.join(self.temp_dir, "extracted")
-
-        if self.console:
-            self.console.print(f"Extracting server archive...", style="cyan")
-            self.console.log_message(
-                "INFO", f"Extracting server archive: {archive_path} to {extract_dir}"
-            )
-
-        # Create extraction directory if it doesn't exist
-        if self.filesystem:
-            self.filesystem.mkdir(extract_dir, exist_ok=True)
-        else:
-            self.system.run_mkdir(extract_dir)
-
-        if self.system.dry_run:
-            if self.console:
-                self.console.print(
-                    f"[DRY RUN] Would extract server archive to: {extract_dir}",
-                    style="blue",
-                )
-            return True
-
-        try:
-            if self.archiver:
-                success = self.archiver.extractall(archive_path, extract_dir)
-                if not success:
-                    if self.console:
-                        self.console.print(
-                            f"Error: Failed to extract server archive.", style="red"
-                        )
-                    return False
+                return None
             else:
-                with tarfile.open(archive_path) as tar:
-                    # Create a safer extraction function to avoid path traversal attacks
-                    def is_within_directory(directory, target):
-                        abs_directory = os.path.abspath(directory)
-                        abs_target = os.path.abspath(target)
-                        prefix = os.path.commonprefix([abs_directory, abs_target])
-                        return prefix == abs_directory
+                raise BackupError(f"Unexpected error during backup: {e}") from e
 
-                    def safe_extract(tar, path):
-                        for member in tar.getmembers():
-                            member_path = os.path.join(path, member.name)
-                            if not is_within_directory(path, member_path):
-                                raise Exception("Attempted path traversal in tar file")
-                        tar.extractall(path)
-
-                    safe_extract(tar, extract_dir)
-
-            if self.console:
-                self.console.print(f"Extraction completed.", style="green")
-                self.console.log_message(
-                    "INFO", f"Server archive extracted to: {extract_dir}"
-                )
-            return True
-        except Exception as e:
-            if self.console:
-                self.console.print(f"Error extracting server archive: {e}", style="red")
-                self.console.log_message("ERROR", f"Failed to extract archive: {e}")
-            return False
-
-    def _update_server_files(self) -> bool:
-        """Update the server files using rsync or fallback method
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if self.console:
-            self.console.print(
-                f"Updating server files in {self.server_dir}...", style="cyan"
+    def _download_server_archive(self, download_url: str) -> None:
+        """Download the server archive"""
+        if not self.archive_name:
+            raise DownloadError(
+                "Internal error: archive_name not set before download attempt."
             )
 
-        if self.system.rsync_available:
-            return self._update_with_rsync()
-        else:
-            return self._update_with_fallback()
+        self.console.info(f"Downloading server archive from: {download_url}")
+        self.console.info(f"Saving to: {self.archive_name}")
 
-    def _update_with_rsync(self) -> bool:
-        """Update server files using rsync (preferred method)
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if self.console:
-            self.console.print(
-                "Using rsync for safe, precise updates...", style="green"
-            )
-        if self.system.dry_run:
-            if self.console:
-                self.console.print(
-                    f"[DRY RUN] Would rsync from {self.temp_dir}/ to {self.server_dir}/",
-                    style="blue",
-                )
-            return True
-
-        try:
-            self.system.run_with_sudo(
-                [
-                    "rsync",
-                    "-a",
-                    "--delete",
-                    "--exclude=serverconfig.json",
-                    "--exclude=Mods/",
-                    "--exclude=modconfig/",
-                    f"{self.temp_dir}/",
-                    f"{self.server_dir}/",
-                ],
-                check=True,
-            )
-            return True
-        except Exception as e:
-            if self.console:
-                self.console.print(
-                    f"Error: rsync failed to update server files in {self.server_dir}: {e}",
-                    style="red",
-                )
-            return False
-
-    def _update_with_fallback(self) -> bool:
-        """Update server files using fallback method (when rsync is not available)
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if self.console:
-            self.console.print(
-                "WARNING: Using fallback update method (rsync not available)",
-                style="red",
-            )
-            self.console.print(
-                "This method is less precise but has been improved for safety",
-                style="red",
-            )
-            self.console.print(
-                "It is still recommended to install rsync before proceeding.",
-                style="yellow",
-            )
-
-        if not self.system.dry_run:
-            if self.console:
-                self.console.print(
-                    "Do you want to continue with the fallback method? (y/N)",
-                    style="yellow",
-                )
-                response = input().lower()
-                if response not in ("y", "yes"):
-                    if self.console:
-                        self.console.print(
-                            "Update aborted. Please install rsync and try again.",
-                            style="cyan",
-                        )
-                    return False
-
-        if self.console:
-            self.console.print(
-                "Proceeding with improved fallback update method...", style="yellow"
-            )
-
-        # Create a timestamp for the temporary backup directory
-        backup_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        old_files_dir = os.path.join(
-            self.server_dir, f".old_update_files_{backup_timestamp}"
-        )
-
-        return self._move_files_to_backup(old_files_dir) and self._copy_new_files(
-            old_files_dir
-        )
-
-    def _move_files_to_backup(self, old_files_dir: str) -> bool:
-        """Move current server files to temporary backup location
-
-        Args:
-            old_files_dir: Directory to move files to
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if self.console:
-            self.console.print(
-                f"Moving current server files to temporary location: {old_files_dir}",
-                style="blue",
-            )
-        if self.system.dry_run:
-            if self.console:
-                self.console.print(
-                    f"[DRY RUN] Would move current server files to: {old_files_dir}",
-                    style="blue",
-                )
-            return True
-
-        try:
-            # Create backup directory
-            self.system.run_mkdir(old_files_dir)
-
-            # List of paths to preserve
-            preserve_paths = [
-                os.path.join(self.server_dir, "serverconfig.json"),
-                os.path.join(self.server_dir, "Mods"),
-                os.path.join(self.server_dir, "modconfig"),
-            ]
-
-            # Move files except preserved ones
-            for item in self.system.list_dir(self.server_dir):
-                item_path = os.path.join(self.server_dir, item)
-
-                # Skip temporary backup directories and preserved paths
-                if item.startswith(".old_update_files_") or any(
-                    os.path.samefile(item_path, path)
-                    if os.path.exists(path)
-                    else item == os.path.basename(path)
-                    for path in preserve_paths
-                ):
-                    continue
-
-                # Move the item to backup directory
-                self.system.move(item_path, os.path.join(old_files_dir, item))
-            return True
-        except Exception as e:
-            if self.console:
-                self.console.print(
-                    f"Error: Failed to move server files to temporary location: {e}",
-                    style="red",
-                )
-            # Clean up the temporary directory
-            self.system.rmtree(old_files_dir, ignore_errors=True)
-            return False
-
-    def _copy_new_files(self, old_files_dir: str) -> bool:
-        """Copy new files from temporary directory to server directory
-
-        Args:
-            old_files_dir: Backup directory containing the original files
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        if self.console:
-            self.console.print("Copying new server files...", style="blue")
-        if self.system.dry_run:
-            if self.console:
-                self.console.print(
-                    f"[DRY RUN] Would copy new server files from {self.temp_dir} to {self.server_dir}",
-                    style="blue",
-                )
-                self.console.print(
-                    "[DRY RUN] Would remove temporary backup directory after successful update",
-                    style="blue",
-                )
-            return True
-
-        try:
-            # Copy new files
-            for item in self.system.list_dir(self.temp_dir):
-                src_path = os.path.join(self.temp_dir, item)
-                dst_path = os.path.join(self.server_dir, item)
-
-                if self.system.is_dir(src_path):
-                    if self.system.path_exists(dst_path):
-                        self.system.rmtree(dst_path)
-                    self.system.copytree(src_path, dst_path)
-                else:
-                    self.system.copy(src_path, dst_path)
-
-            # If copy was successful, clean up the temporary backup
-            if self.console:
-                self.console.print(
-                    "Update successful. Cleaning up temporary backup...", style="blue"
-                )
-            self.system.rmtree(old_files_dir)
-            return True
-        except Exception as e:
-            if self.console:
-                self.console.print(
-                    f"Error: Failed to copy new server files: {e}", style="red"
-                )
-                self.console.print(
-                    "Attempting to restore from temporary backup...", style="yellow"
-                )
-
-            # Attempt to restore from the temporary backup
+        if self.dry_run:
+            self.console.info("[DRY RUN] Skipping download.")
+            # Create a dummy file to allow extraction step to proceed in dry run if needed
             try:
-                for item in self.system.list_dir(old_files_dir):
-                    src_path = os.path.join(old_files_dir, item)
-                    dst_path = os.path.join(self.server_dir, item)
+                with open(self.archive_name, "w") as f:
+                    f.write("dry run placeholder")
+            except Exception as e:
+                self.console.warning(
+                    f"[DRY RUN] Could not create dummy archive file: {e}"
+                )
+            return
 
-                    if self.system.is_dir(src_path):
-                        if self.system.path_exists(dst_path):
-                            self.system.rmtree(dst_path)
-                        self.system.copytree(src_path, dst_path)
-                    else:
-                        self.system.copy(src_path, dst_path)
-                if self.console:
-                    self.console.print(
-                        "Restored server files from temporary backup.",
-                        style="green",
-                    )
-            except Exception as restore_error:
-                if self.console:
-                    self.console.print(
-                        f"CRITICAL: Failed to restore server files! Server may be in an inconsistent state: {restore_error}",
-                        style="red",
-                    )
-                    self.console.print(
-                        f"Manual intervention required. Backup files are at: {old_files_dir}",
-                        style="red",
-                    )
-            return False
+        try:
+            # Use the http_client interface's download method
+            success = self.http_client.download(download_url, self.archive_name)
+            if not success:
+                # http_client.download should ideally raise, but handle bool return
+                raise DownloadError(
+                    f"Download failed (reported by IHttpClient). Check URL and network: {download_url}"
+                )
+            self.console.info("Download completed successfully.")
+        except DownloadError as e:
+            self.console.error(f"Download failed: {e}")
+            self._cleanup_downloaded_archive()
+            raise
+        except Exception as e:
+            self.console.error(f"Unexpected error during download: {e}", exc_info=True)
+            self._cleanup_downloaded_archive()
+            raise DownloadError(
+                f"Unexpected error downloading {download_url}: {e}"
+            ) from e
 
-    def _start_and_verify_server(self, new_version: str) -> bool:
-        """Start the server and verify its status and version
-
-        Args:
-            new_version: Version to verify
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        # Set ownership
-        if self.console:
-            self.console.print(
-                f"Setting ownership for {self.server_dir} to {self.server_user}:{self.server_user}...",
-                style="cyan",
+    def _extract_server_archive(self) -> None:
+        """Extract the downloaded server archive"""
+        if not self.archive_name or not self.filesystem.exists(self.archive_name):
+            # If download was skipped in dry run, the dummy file might exist
+            if (
+                self.dry_run
+                and self.archive_name
+                and self.filesystem.exists(self.archive_name)
+            ):
+                self.console.info(
+                    "[DRY RUN] Skipping extraction of dummy archive file."
+                )
+                # Create dummy extraction dir for dry run consistency
+                try:
+                    self.filesystem.mkdir(self.archive_name, exist_ok=True)
+                except:
+                    pass
+                return
+            raise DownloadError(
+                "Cannot extract archive: Downloaded archive file not found or path not set."
             )
-        self.system.run_chown(
-            f"{self.server_user}:{self.server_user}",
-            self.server_dir,
-            recursive=True,
+
+        self.console.info(f"Extracting archive: {self.archive_name}")
+
+        # Clean up previous extraction if it exists
+        if self.filesystem.exists(self.archive_name):
+            self.console.debug(
+                f"Removing existing extraction directory: {self.archive_name}"
+            )
+            try:
+                self.filesystem.rmtree(self.archive_name)
+            except FileSystemError as e:
+                raise DownloadError(
+                    f"Failed to remove previous extraction directory '{self.archive_name}': {e}"
+                ) from e
+
+        if self.dry_run:
+            self.console.info("[DRY RUN] Skipping extraction.")
+            # Create dummy extraction dir
+            try:
+                self.filesystem.mkdir(self.archive_name, exist_ok=True)
+            except:
+                pass
+            return
+
+        try:
+            # Extract using IArchiver
+            success = self.archiver.extractall(self.archive_name, self.archive_name)
+            if not success:
+                # Archiver should ideally raise, but handle bool return
+                raise DownloadError(
+                    f"Extraction failed (reported by IArchiver). Archive: '{self.archive_name}'"
+                )
+
+            self.console.info("Extraction completed successfully.")
+        except DownloadError as e:
+            self.console.error(f"Extraction failed: {e}")
+            self._cleanup_extracted_files()
+            raise
+        except Exception as e:
+            self.console.error(
+                f"Unexpected error during extraction: {e}", exc_info=True
+            )
+            self._cleanup_extracted_files()
+            raise DownloadError(
+                f"Unexpected error extracting '{self.archive_name}': {e}"
+            ) from e
+
+    def _update_server_files(self) -> None:
+        """Update the server files using rsync if available, otherwise use fallback"""
+        if not self.archive_name or not self.filesystem.isdir(self.archive_name):
+            # Handle dry run case where dir might exist but is empty
+            if (
+                self.dry_run
+                and self.archive_name
+                and self.filesystem.exists(self.archive_name)
+            ):
+                self.console.info("[DRY RUN] Skipping server file update step.")
+                return
+            raise UpdateError(
+                "Cannot update server files: Extracted update content not found."
+            )
+
+        # Decide update strategy
+        if self.rsync_available and self.process_runner:
+            self.console.info("Updating server files using rsync...")
+            self._update_with_rsync()
+        else:
+            self.console.info(
+                "rsync not available or no process runner. Updating server files using fallback method (move/copy)..."
+            )
+            self._update_with_fallback()
+
+        self.console.info("Server files updated successfully.")
+
+    def _update_with_rsync(self) -> None:
+        """Update files using rsync"""
+        if not self.process_runner:
+            raise DependencyError(
+                "rsync update requires a process runner, but none was provided."
+            )
+        if not self.rsync_available:
+            raise DependencyError(
+                "rsync command not found, cannot use rsync update method."
+            )
+
+        # Ensure source directory ends with / for rsync to copy contents
+        source_dir = self.archive_name.rstrip("/") + "/"
+        target_dir = self.server_dir
+
+        rsync_cmd = [
+            "rsync",
+            "-av",
+            "--delete",
+            source_dir,
+            target_dir,
+        ]
+
+        self.console.info(f"Running rsync: {' '.join(rsync_cmd)}")
+
+        if self.dry_run:
+            self.console.info("[DRY RUN] Skipping rsync execution.")
+            return
+
+        try:
+            # Run rsync potentially with sudo if server dir requires it
+            self.process_runner.run_sudo(rsync_cmd, check=True)
+            self.console.info("rsync completed successfully.")
+            # Ensure final ownership is correct after rsync
+            self.console.debug(
+                f"Ensuring ownership of server directory {target_dir}..."
+            )
+            self.filesystem.chown(
+                target_dir, self.server_user, self.server_user, recursive=True
+            )
+
+        except ProcessError as e:
+            raise UpdateError(f"rsync command failed: {e}") from e
+        except FileSystemError as e:
+            raise UpdateError(
+                f"Filesystem error during/after rsync (e.g., chown): {e}"
+            ) from e
+        except Exception as e:
+            raise UpdateError(f"Unexpected error during rsync update: {e}") from e
+
+    def _update_with_fallback(self) -> None:
+        """Fallback update method: move old files, copy new files"""
+        self.console.warning(
+            "Using fallback update method (less efficient and atomic than rsync)."
         )
-        if self.console:
-            self.console.print("Server files updated.", style="green")
-
-        # Start the server
-        if self.console:
-            self.console.print(
-                f"Starting server ({self.service_name})...", style="cyan"
+        old_files_backup_dir = None
+        try:
+            # 1. Create a temporary backup location for old server files
+            timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+            old_files_backup_dir = os.path.join(
+                self.temp_dir, f"vs_old_files_{timestamp}"
             )
-        if not self.service_mgr or not self.service_mgr.run_systemctl(
-            "start", self.service_name
-        ):
-            if self.console:
-                self.console.print(
-                    "Error: Failed to start the server service after update.",
-                    style="red",
-                )
-                self.console.print(
-                    f"Check service status: systemctl status {self.service_name}.service",
-                    style="yellow",
-                )
-            return False
+            self.console.info(
+                f"Creating temporary backup of current server files in: {old_files_backup_dir}"
+            )
+            self.filesystem.mkdir(old_files_backup_dir, exist_ok=True)
 
-        self.server_stopped = False  # Mark server as successfully started
-        if self.console:
-            self.console.print("Server start command issued.", style="green")
-
-        # Verify status and version after start
-        status_ok = True
-        version_ok = True
-
-        if self.service_mgr:
-            status_ok = self.service_mgr.check_server_status(self.service_name)
-
-        if self.version_checker:
-            version_ok = self.version_checker.verify_server_version(new_version)
-
-        if not status_ok:
-            if self.console:
-                self.console.print(
-                    "Warning: Server status check reported potential issues after start.",
-                    style="yellow",
-                )
-
-        if not version_ok:
-            if self.console:
-                self.console.print(
-                    "Warning: Server version verification reported potential issues after start.",
-                    style="yellow",
-                )
-
-        # Return success even with warnings
-        return True
-
-    def _display_update_completion(
-        self,
-        new_version: str,
-        backup_file: Optional[str],
-        skip_backup: bool,
-        ignore_backup_failure: bool,
-    ):
-        """Display update completion message
-
-        Args:
-            new_version: Version updated to
-            backup_file: Path to the backup file (if any)
-            skip_backup: Whether backup was skipped
-            ignore_backup_failure: Whether backup failures were ignored
-        """
-        if self.console:
-            self.console.print("=== Update process completed ===", style="green")
-            self.console.print(
-                f"Vintage Story server update process finished for version {new_version}",
-                style="green",
+            # 2. Move existing server files to the temporary backup location
+            self.console.debug(
+                f"Moving existing files from {self.server_dir} to {old_files_backup_dir}"
+            )
+            # List items in server_dir and move them individually
+            items_to_move = self.filesystem.listdir(self.server_dir)
+            moved_count = 0
+            for item in items_to_move:
+                src_path = os.path.join(self.server_dir, item)
+                dst_path = os.path.join(old_files_backup_dir, item)
+                try:
+                    self.console.debug(f"Moving: {src_path} -> {dst_path}")
+                    if self.dry_run:
+                        self.console.info(
+                            f"[DRY RUN] Would move {src_path} to {dst_path}"
+                        )
+                    else:
+                        self.filesystem.move(src_path, dst_path)
+                    moved_count += 1
+                except FileSystemError as e:
+                    # If moving fails, log and potentially try to rollback/stop
+                    raise UpdateError(
+                        f"Failed to move existing server file/dir '{src_path}': {e}. Update cannot proceed safely."
+                    ) from e
+            self.console.info(
+                f"Successfully moved {moved_count} items to temporary backup."
             )
 
-            if backup_file:
-                self.console.print(f"Backup created at: {backup_file}", style="cyan")
-            elif not skip_backup and ignore_backup_failure:
-                self.console.print(
-                    "Reminder: Backup creation was attempted but failed (failure was ignored).",
-                    style="yellow",
+            # 3. Copy new files from extracted update path to server directory
+            self.console.info(
+                f"Copying new server files from {self.archive_name} to {self.server_dir}"
+            )
+            # Copy contents of extracted dir
+            items_to_copy = self.filesystem.listdir(self.archive_name)
+            copied_count = 0
+            for item in items_to_copy:
+                src_path = os.path.join(self.archive_name, item)
+                dst_path = os.path.join(self.server_dir, item)
+                try:
+                    self.console.debug(f"Copying: {src_path} -> {dst_path}")
+                    if self.dry_run:
+                        self.console.info(
+                            f"[DRY RUN] Would copy {src_path} to {dst_path}"
+                        )
+                    else:
+                        # Use the filesystem interface copy method directly.
+                        # The implementation (e.g., OsFileSystem) should handle
+                        # whether src_path is a file or directory.
+                        self.filesystem.copy(src_path, dst_path)
+                    copied_count += 1
+                except FileSystemError as e:
+                    # If copying fails, log and potentially try to rollback
+                    raise UpdateError(
+                        f"Failed to copy new server file/dir '{src_path}': {e}. Server directory may be inconsistent."
+                    ) from e
+            self.console.info(
+                f"Successfully copied {copied_count} items to server directory."
+            )
+
+            # 4. Set ownership of the server directory
+            self.console.info(f"Setting final ownership for {self.server_dir}...")
+            if not self.dry_run:
+                if not self.filesystem.chown(
+                    self.server_dir, self.server_user, self.server_user, recursive=True
+                ):
+                    self.console.warning(
+                        f"Failed to set final ownership on {self.server_dir}. Check permissions manually."
+                    )
+            else:
+                self.console.info(
+                    f"[DRY RUN] Would set ownership of {self.server_dir} recursively for user {self.server_user}"
                 )
+
+            # 5. Cleanup the temporary backup of old files (optional, could keep for rollback)
+            self.console.info(
+                f"Removing temporary backup of old files: {old_files_backup_dir}"
+            )
+            if not self.dry_run:
+                self.filesystem.rmtree(old_files_backup_dir)
+            else:
+                self.console.info(f"[DRY RUN] Would remove {old_files_backup_dir}")
+
+        except (FileSystemError, UpdateError) as e:
+            # If any step failed, re-raise the error
+            raise
+        except Exception as e:
+            raise UpdateError(f"Unexpected error during fallback update: {e}") from e
+
+    def _start_and_verify_server(self, new_version: str) -> None:
+        """Start the server and verify its version"""
+        self.console.info(f"Starting server service: {self.service_name}...")
+        try:
+            self.service_mgr.run_systemctl("start", self.service_name)
+            self.server_stopped = False
+        except ServiceError as e:
+            raise ServiceError(
+                f"Failed to start service '{self.service_name}' after update: {e}"
+            ) from e
+
+        # Wait for server to potentially start up
+        self.console.info("Waiting for server to initialize before verification...")
+        wait_time = 10
+        if self.dry_run:
+            self.console.info(f"[DRY RUN] Skipping {wait_time}s wait.")
+        else:
+            time.sleep(wait_time)
+
+        # Check service status
+        if not self.dry_run:
+            if not self.service_mgr.check_server_status(self.service_name):
+                # check_server_status logs warnings, raise error here
+                raise ServiceError(
+                    f"Service '{self.service_name}' did not become active after update."
+                )
+            else:
+                self.console.info(f"Service '{self.service_name}' is active.")
+        else:
+            self.console.info(f"[DRY RUN] Skipping service active check.")
+
+        # Verify server version (best effort)
+        self.console.info("Verifying installed server version after update...")
+        if self.dry_run:
+            self.console.info(f"[DRY RUN] Skipping version verification.")
+            return
+
+        try:
+            # Use VersionChecker's verification method
+            if not self.version_checker.verify_server_version(new_version):
+                # verify_server_version logs the error
+                raise VersioningError(
+                    f"Server version verification failed after update. Expected '{new_version}'. Check logs."
+                )
+            else:
+                self.console.info("Server version verified successfully.")
+        except VersioningError as e:
+            raise
+        except Exception as e:
+            # Treat unexpected verification errors as warnings, as server might be okay
+            self.console.warning(
+                f"Could not definitively verify server version after update: {e}. Check manually."
+            )
 
     def cleanup(self) -> None:
-        """Clean up temporary files and restart server if necessary"""
-        # Clean up temporary update directory
-        if (
-            self.temp_dir
-            and self.system.path_exists(self.temp_dir)
-            and self.temp_dir != "/"
-        ):
-            if self.console:
-                self.console.print(
-                    f"Cleaning up temporary directory: {self.temp_dir}",
-                    style="blue",
-                )
-            if not self.system.dry_run:
-                self.system.rmtree(self.temp_dir, ignore_errors=True)
-            elif self.console:
-                self.console.print(
-                    f"[DRY RUN] Would remove temporary directory: {self.temp_dir}",
-                    style="blue",
-                )
+        """Clean up temporary files and attempt to restart server if needed"""
+        self.console.info("Performing cleanup...")
 
-        # Clean up downloaded archive
-        if self.archive_name and os.path.isfile(f"/tmp/{self.archive_name}"):
-            if self.console:
-                self.console.print(
-                    f"Cleaning up downloaded archive: /tmp/{self.archive_name}",
-                    style="blue",
-                )
-            if not self.system.dry_run:
-                os.remove(f"/tmp/{self.archive_name}")
-            elif self.console:
-                self.console.print(
-                    f"[DRY RUN] Would remove archive: /tmp/{self.archive_name}",
-                    style="blue",
-                )
+        # Clean downloaded archive
+        self._cleanup_downloaded_archive()
 
-        # Attempt to restart server if it was stopped by this script and is not currently running
-        if self.server_stopped and self.service_mgr:
+        # Clean extracted files
+        self._cleanup_extracted_files()
+
+        # Attempt to restart server if it was stopped by the script and not restarted
+        if self.server_stopped:
+            self.console.warning(
+                "Update process ended with server potentially stopped. Attempting restart..."
+            )
             try:
-                if not self.service_mgr.is_service_active(self.service_name):
-                    if self.console:
-                        self.console.print(
-                            f"Attempting to restart server ({self.service_name}) after script interruption/error...",
-                            style="yellow",
-                        )
-                    if self.service_mgr.check_service_exists(self.service_name):
-                        if self.service_mgr.run_systemctl("start", self.service_name):
-                            if self.console:
-                                self.console.print(
-                                    "Server restart command issued successfully.",
-                                    style="green",
-                                )
-                                self.console.log_message(
-                                    "INFO",
-                                    f"Server {self.service_name} restarted after script interruption.",
-                                )
-                        elif self.console:
-                            self.console.print(
-                                f"Failed to issue server restart command. Check status manually: systemctl status {self.service_name}.service",
-                                style="red",
-                            )
-                            self.console.log_message(
-                                "ERROR",
-                                f"Failed to restart server {self.service_name} after script interruption.",
-                            )
-                    elif self.console:
-                        self.console.print(
-                            f"Service {self.service_name} does not exist. Cannot restart.",
-                            style="yellow",
-                        )
-                        self.console.log_message(
-                            "WARNING",
-                            f"Cannot restart non-existent service {self.service_name}.",
-                        )
+                self.service_mgr.run_systemctl("start", self.service_name)
+                self.server_stopped = False
+                self.console.info(
+                    f"Restart command issued for service '{self.service_name}'."
+                )
+            except ServiceError as e:
+                self.console.error(
+                    f"Failed to issue restart command during cleanup: {e}"
+                )
             except Exception as e:
-                if self.console:
-                    self.console.log_message(
-                        "ERROR", f"Error during cleanup restart attempt: {e}"
+                self.console.error(
+                    f"Unexpected error issuing restart command during cleanup: {e}",
+                    exc_info=True,
+                )
+
+        self.console.info("Cleanup finished.")
+
+    def _cleanup_downloaded_archive(self):
+        """Remove the downloaded archive file if it exists"""
+        if self.archive_name and self.filesystem.exists(self.archive_name):
+            self.console.debug(f"Removing downloaded archive: {self.archive_name}")
+            try:
+                if not self.dry_run:
+                    self.filesystem.remove(self.archive_name)
+                else:
+                    self.console.info(f"[DRY RUN] Would remove {self.archive_name}")
+            except Exception as e:
+                self.console.warning(
+                    f"Failed to remove downloaded archive '{self.archive_name}': {e}"
+                )
+        self.archive_name = ""
+
+    def _cleanup_extracted_files(self):
+        """Remove the extracted update files directory if it exists"""
+        if self.archive_name and self.filesystem.exists(self.archive_name):
+            self.console.debug(
+                f"Removing extracted files directory: {self.archive_name}"
+            )
+            try:
+                if not self.dry_run:
+                    self.filesystem.rmtree(self.archive_name)
+                else:
+                    self.console.info(
+                        f"[DRY RUN] Would remove directory tree {self.archive_name}"
                     )
+            except Exception as e:
+                self.console.warning(
+                    f"Failed to remove extracted files directory '{self.archive_name}': {e}"
+                )
+        self.archive_name = ""

@@ -1,32 +1,36 @@
 import time
-import subprocess
-from typing import Optional
+from typing import TYPE_CHECKING
 
 from interfaces import IProcessRunner
+from errors import ServiceError
+
+if TYPE_CHECKING:
+    from system import SystemInterface
+    from ui import ConsoleManager
 
 
 class ServiceManager:
-    """Manages systemd service operations"""
+    """Manages systemd service operations using IProcessRunner."""
 
     def __init__(
         self,
-        system_interface,
-        process_runner: Optional[IProcessRunner] = None,
-        console=None,
+        system_interface: "SystemInterface",
+        process_runner: IProcessRunner,
+        console: "ConsoleManager",
     ):
-        """Initialize ServiceManager
+        """Initialize ServiceManager.
 
         Args:
             system_interface: SystemInterface instance for system operations
             process_runner: IProcessRunner implementation for process operations
-            console: ConsoleManager instance for output (optional)
+            console: ConsoleManager instance for output
         """
         self.system = system_interface
         self.process_runner = process_runner
         self.console = console
 
     def check_service_exists(self, service_name: str) -> bool:
-        """Check if the systemd service exists
+        """Check if the systemd service exists.
 
         Args:
             service_name: Name of the service to check
@@ -34,63 +38,48 @@ class ServiceManager:
         Returns:
             bool: True if the service exists, False otherwise
         """
+        self.console.debug(f"Checking existence of service: {service_name}.service")
         try:
-            if self.process_runner:
-                result = self.process_runner.run(
-                    ["systemctl", "list-unit-files", f"{service_name}.service"],
-                    check=False,
-                    capture_output=True,
-                )
-                return f"{service_name}.service" in result.stdout
-            else:
-                result = subprocess.run(
-                    ["systemctl", "list-unit-files", f"{service_name}.service"],
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                return f"{service_name}.service" in result.stdout
+            result = self.process_runner.run(
+                ["systemctl", "list-unit-files", f"{service_name}.service"],
+                check=False,
+                capture_output=True,
+            )
+            exists = f"{service_name}.service" in result.stdout
+            self.console.debug(f"Service '{service_name}' exists: {exists}")
+            return exists
         except Exception as e:
-            if self.console:
-                self.console.log_message(
-                    "ERROR", f"Failed to check service existence: {e}"
-                )
+            self.console.error(
+                f"Failed to check existence for service '{service_name}': {e}",
+                exc_info=True,
+            )
             return False
 
-    def run_systemctl(self, action: str, service: str) -> bool:
-        """Execute systemctl command on a service
+    def run_systemctl(self, action: str, service_name: str) -> None:
+        """Execute systemctl command on a service, raising ServiceError on failure.
 
         Args:
             action: Action to perform (start, stop, restart, status)
-            service: Name of the service
-
-        Returns:
-            bool: True if successful, False otherwise
+            service_name: Name of the service
         """
-        msg = f"systemctl {action} {service}.service"
-        if self.console:
-            self.console.log_message("DEBUG", f"Executing {msg}")
+        cmd_list = ["systemctl", action, f"{service_name}.service"]
+        cmd_str = " ".join(cmd_list)
+        self.console.info(f"Executing: {cmd_str}")
 
         if self.system.dry_run:
-            if self.console:
-                self.console.print(f"[DRY RUN] Would run: {msg}", style="blue")
-            return True
+            self.console.info(f"[DRY RUN] Would run: {cmd_str}")
+            return
 
         try:
-            self.system.run_with_sudo(
-                ["systemctl", action, f"{service}.service"], check=True
-            )
-            if self.console:
-                self.console.log_message("INFO", f"{msg} successful")
-            return True
+            self.system.run_with_sudo(cmd_list, check=True)
+            self.console.info(f"Successfully executed: {cmd_str}")
         except Exception as e:
-            if self.console:
-                self.console.log_message("ERROR", f"{msg} failed: {e}")
-            return False
+            err_msg = f"Failed to execute '{cmd_str}': {e}"
+            self.console.error(err_msg)
+            raise ServiceError(err_msg) from e
 
     def is_service_active(self, service_name: str) -> bool:
-        """Check if a systemd service is active
+        """Check if a systemd service is active.
 
         Args:
             service_name: Name of the service to check
@@ -98,30 +87,27 @@ class ServiceManager:
         Returns:
             bool: True if the service is active, False otherwise
         """
+        self.console.debug(f"Checking active state for service: {service_name}.service")
         try:
-            if self.process_runner:
-                result = self.process_runner.run(
-                    ["systemctl", "is-active", f"{service_name}.service"],
-                    check=False,
-                    capture_output=True,
-                )
-                return result.stdout.strip() == "active"
-            else:
-                result = subprocess.run(
-                    ["systemctl", "is-active", f"{service_name}.service"],
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                return result.stdout.strip() == "active"
-        except Exception:
+            result = self.process_runner.run(
+                ["systemctl", "is-active", f"{service_name}.service"],
+                check=False,
+                capture_output=True,
+            )
+            is_active = result.stdout.strip() == "active"
+            self.console.debug(f"Service '{service_name}' active state: {is_active}")
+            return is_active
+        except Exception as e:
+            self.console.warning(
+                f"Could not determine active state for service '{service_name}': {e}",
+                exc_info=False,
+            )
             return False
 
     def check_server_status(
         self, service_name: str, max_attempts: int = 5, wait_time: int = 3
     ) -> bool:
-        """Check if the server is running after restart
+        """Check if the server service becomes active within a given time.
 
         Args:
             service_name: Name of the service to check
@@ -131,75 +117,55 @@ class ServiceManager:
         Returns:
             bool: True if the server is running, False otherwise
         """
-        if self.console:
-            self.console.print(
-                f"Checking server status ({service_name})...", style="cyan"
-            )
+        self.console.info(f"Waiting for service '{service_name}' to become active...")
 
-        # Check status up to max_attempts times
         for i in range(1, max_attempts + 1):
-            time.sleep(wait_time)
             if self.is_service_active(service_name):
-                if self.console:
-                    self.console.print("Server is running.", style="green")
+                self.console.info(f"Service '{service_name}' is active.")
                 return True
-            if i == max_attempts:
-                if self.console:
-                    self.console.print(
-                        f"WARNING: Server did not report active status after {max_attempts} checks.",
-                        style="red",
-                    )
-                    self.console.print(
-                        f"Check status manually: systemctl status {service_name}.service",
-                        style="yellow",
-                    )
-                return False
-            if self.console:
-                self.console.print(
-                    f"Waiting for server status (attempt {i} of {max_attempts})...",
-                    style="yellow",
-                )
 
-        # This should not be reached due to the i==max_attempts check in the loop
-        if self.console:
-            self.console.print(
-                "Error: Loop finished unexpectedly in check_server_status.", style="red"
-            )
+            if i < max_attempts:
+                self.console.debug(
+                    f"Service not active yet. Waiting {wait_time}s... (Attempt {i}/{max_attempts})"
+                )
+                time.sleep(wait_time)
+            else:
+                self.console.warning(
+                    f"Service '{service_name}' did not become active after {max_attempts} checks ({max_attempts * wait_time} seconds)."
+                )
+                self.console.warning(
+                    f"Check status manually: sudo systemctl status {service_name}.service"
+                )
+                return False
+
         return False
 
-    def get_service_status(self, service_name: str) -> Optional[str]:
-        """Get the status of a service (running, stopped, or unknown)
+    def get_service_status(self, service_name: str) -> str:
+        """Get the status: 'running', 'stopped', 'not-found', or 'error'.
 
         Args:
             service_name: Name of the service to check
 
         Returns:
-            Optional[str]: Status of the service or None if error
+            str: Status of the service
         """
-        if self.is_service_active(service_name):
-            return "running"
-
-        # Check if service exists but is not running
+        self.console.debug(f"Getting status for service '{service_name}'.")
         try:
-            if self.process_runner:
-                result = self.process_runner.run(
-                    ["systemctl", "list-unit-files", f"{service_name}.service"],
-                    check=False,
-                    capture_output=True,
+            if self.is_service_active(service_name):
+                self.console.debug(f"Service '{service_name}' is active (running).")
+                return "running"
+
+            if self.check_service_exists(service_name):
+                self.console.debug(
+                    f"Service '{service_name}' exists but is not active (stopped)."
                 )
-                if f"{service_name}.service" in result.stdout:
-                    return "stopped"
-                return "unknown"
+                return "stopped"
             else:
-                result = subprocess.run(
-                    ["systemctl", "list-unit-files", f"{service_name}.service"],
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
-                if f"{service_name}.service" in result.stdout:
-                    return "stopped"
-                return "unknown"
-        except Exception:
-            return None
+                self.console.debug(f"Service '{service_name}' unit file not found.")
+                return "not-found"
+
+        except Exception as e:
+            self.console.error(
+                f"Error getting status for service '{service_name}': {e}", exc_info=True
+            )
+            return "error"

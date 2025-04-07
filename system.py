@@ -1,9 +1,11 @@
 import os
 import shutil
 import subprocess
-from typing import List, Optional, Union
-
+from typing import List, Optional, Union, TYPE_CHECKING
 from interfaces import IProcessRunner, IFileSystem
+
+if TYPE_CHECKING:
+    from ui import ConsoleManager
 
 
 class SystemInterface:
@@ -11,7 +13,7 @@ class SystemInterface:
 
     def __init__(
         self,
-        console=None,
+        console: "ConsoleManager",  # Enforce type hint
         process_runner: Optional[IProcessRunner] = None,
         filesystem: Optional[IFileSystem] = None,
         dry_run: bool = False,
@@ -45,11 +47,9 @@ class SystemInterface:
         """
         if self.dry_run:
             cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
-            if self.console:
-                self.console.print(
-                    f"[DRY RUN] Would run: {'sudo ' if not self.is_root else ''}{cmd_str}",
-                    style="blue",
-                )
+            self.console.info(
+                f"[DRY RUN] Would run: {'sudo ' if not self.is_root else ''}{cmd_str}"
+            )
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0, stdout="", stderr=""
             )
@@ -75,44 +75,42 @@ class SystemInterface:
         Returns:
             bool: True if successful, False otherwise
         """
-        if self.console:
-            self.console.log_message("DEBUG", f"Creating directory: {directory}")
+        self.console.debug(f"Ensuring directory exists: {directory}")
 
         if self.dry_run:
-            if self.console:
-                self.console.print(
-                    f"[DRY RUN] Would create directory: {directory}", style="blue"
-                )
+            self.console.info(f"[DRY RUN] Would ensure directory exists: {directory}")
             return True
 
         try:
             if self.filesystem:
                 self.filesystem.mkdir(directory, exist_ok=True)
+                self.console.debug(f"IFileSystem.mkdir called for: {directory}")
             else:
                 os.makedirs(directory, exist_ok=True)
+                self.console.info(f"Created directory using os.makedirs: {directory}")
 
-            if self.console:
-                self.console.log_message("INFO", f"Created directory: {directory}")
             return True
         except PermissionError:
+            self.console.debug(
+                f"Permission denied for {directory}, attempting sudo mkdir."
+            )
             try:
-                self.run_with_sudo(["mkdir", "-p", directory], check=True)
-                if self.console:
-                    self.console.log_message(
-                        "INFO", f"Created directory with sudo: {directory}"
-                    )
+                cmd = ["mkdir", "-p", directory]
+                if self.process_runner:
+                    self.process_runner.run_sudo(cmd, check=True)
+                else:
+                    sudo_cmd = cmd if not self.is_root else cmd
+                    subprocess.run(sudo_cmd, check=True, capture_output=True)
+
+                self.console.info(f"Created directory with sudo: {directory}")
                 return True
-            except Exception as e:
-                if self.console:
-                    self.console.log_message(
-                        "ERROR", f"Failed to create directory: {directory}: {e}"
-                    )
+            except (subprocess.CalledProcessError, Exception) as sudo_e:
+                self.console.error(
+                    f"Failed to create directory '{directory}' even with sudo: {sudo_e}"
+                )
                 return False
         except Exception as e:
-            if self.console:
-                self.console.log_message(
-                    "ERROR", f"Failed to create directory: {directory}: {e}"
-                )
+            self.console.error(f"Failed to create directory '{directory}': {e}")
             return False
 
     def run_chown(self, owner: str, target: str, recursive: bool = False) -> bool:
@@ -133,30 +131,37 @@ class SystemInterface:
             else f"chown {owner} {target}"
         )
 
-        if self.console:
-            self.console.log_message("DEBUG", f"Executing {msg}")
+        self.console.debug(f"Attempting: {msg}")
 
         if self.dry_run:
-            if self.console:
-                self.console.print(f"[DRY RUN] Would run: {msg}", style="blue")
+            self.console.info(f"[DRY RUN] Would run: {msg}")
             return True
 
         try:
             if self.filesystem:
                 user, group = owner.split(":")
-                return self.filesystem.chown(target, user, group, recursive)
+                success = self.filesystem.chown(target, user, group, recursive)
+                if success:
+                    self.console.info(f"{msg} successful (via IFileSystem)")
+                else:
+                    self.console.warning(f"{msg} failed (reported by IFileSystem)")
+                return success
             else:
                 cmd = ["chown"]
                 if recursive:
                     cmd.append("-R")
                 cmd.extend([owner, target])
-                self.run_with_sudo(cmd, check=True)
-                if self.console:
-                    self.console.log_message("INFO", f"{msg} successful")
+
+                if self.process_runner:
+                    self.process_runner.run_sudo(cmd, check=True)
+                else:
+                    sudo_cmd = cmd if not self.is_root else cmd
+                    subprocess.run(sudo_cmd, check=True, capture_output=True)
+
+                self.console.info(f"{msg} successful (via process)")
                 return True
-        except Exception as e:
-            if self.console:
-                self.console.log_message("WARNING", f"{msg} failed: {e}")
+        except (subprocess.CalledProcessError, Exception) as e:
+            self.console.error(f"{msg} failed: {e}")
             return False
 
     def which(self, command: str) -> Optional[str]:
@@ -232,16 +237,20 @@ class SystemInterface:
             bool: True if successful, False otherwise
         """
         if self.dry_run:
-            if self.console:
-                self.console.print(f"[DRY RUN] Would remove file: {path}", style="blue")
+            self.console.info(f"[DRY RUN] Would remove file: {path}")
             return True
 
         try:
-            os.remove(path)
-            return True
+            if self.filesystem:
+                self.filesystem.remove(path)
+                self.console.debug(f"IFileSystem.remove called for: {path}")
+                return True
+            else:
+                os.remove(path)
+                self.console.info(f"Removed file: {path}")
+                return True
         except Exception as e:
-            if self.console:
-                self.console.log_message("ERROR", f"Failed to remove file {path}: {e}")
+            self.console.error(f"Failed to remove file '{path}': {e}")
             return False
 
     def rmtree(self, path: str, ignore_errors: bool = False) -> bool:
@@ -255,23 +264,20 @@ class SystemInterface:
             bool: True if successful, False otherwise
         """
         if self.dry_run:
-            if self.console:
-                self.console.print(
-                    f"[DRY RUN] Would remove directory tree: {path}", style="blue"
-                )
+            self.console.info(f"[DRY RUN] Would remove directory tree: {path}")
             return True
 
         try:
             if self.filesystem:
                 self.filesystem.rmtree(path)
+                self.console.debug(f"IFileSystem.rmtree called for: {path}")
+                return True
             else:
                 shutil.rmtree(path, ignore_errors=ignore_errors)
-            return True
+                self.console.info(f"Removed directory tree: {path}")
+                return True
         except Exception as e:
-            if self.console:
-                self.console.log_message(
-                    "ERROR", f"Failed to remove directory tree {path}: {e}"
-                )
+            self.console.error(f"Failed to remove directory tree '{path}': {e}")
             return False
 
     def copy(self, src: str, dst: str) -> bool:
@@ -285,20 +291,23 @@ class SystemInterface:
             bool: True if successful, False otherwise
         """
         if self.dry_run:
-            if self.console:
-                self.console.print(
-                    f"[DRY RUN] Would copy file: {src} to {dst}", style="blue"
-                )
+            self.console.info(f"[DRY RUN] Would copy {src} to {dst}")
             return True
 
         try:
-            shutil.copy2(src, dst)
-            return True
+            if self.filesystem:
+                self.filesystem.copy(src, dst)
+                self.console.debug(f"IFileSystem.copy called for {src} -> {dst}")
+                return True
+            else:
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(src, dst)
+                self.console.info(f"Copied {src} to {dst}")
+                return True
         except Exception as e:
-            if self.console:
-                self.console.log_message(
-                    "ERROR", f"Failed to copy file {src} to {dst}: {e}"
-                )
+            self.console.error(f"Failed to copy {src} to {dst}: {e}")
             return False
 
     def copytree(self, src: str, dst: str) -> bool:
@@ -312,20 +321,22 @@ class SystemInterface:
             bool: True if successful, False otherwise
         """
         if self.dry_run:
-            if self.console:
-                self.console.print(
-                    f"[DRY RUN] Would copy directory tree: {src} to {dst}", style="blue"
-                )
+            self.console.info(f"[DRY RUN] Would copy directory tree {src} to {dst}")
             return True
 
         try:
-            shutil.copytree(src, dst)
-            return True
-        except Exception as e:
-            if self.console:
-                self.console.log_message(
-                    "ERROR", f"Failed to copy directory tree {src} to {dst}: {e}"
+            if self.filesystem:
+                self.filesystem.copy(src, dst)
+                self.console.debug(
+                    f"IFileSystem.copy (for tree) called for {src} -> {dst}"
                 )
+                return True
+            else:
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+                self.console.info(f"Copied directory tree {src} to {dst}")
+                return True
+        except Exception as e:
+            self.console.error(f"Failed to copy directory tree {src} to {dst}: {e}")
             return False
 
     def move(self, src: str, dst: str) -> bool:
@@ -339,16 +350,18 @@ class SystemInterface:
             bool: True if successful, False otherwise
         """
         if self.dry_run:
-            if self.console:
-                self.console.print(
-                    f"[DRY RUN] Would move: {src} to {dst}", style="blue"
-                )
+            self.console.info(f"[DRY RUN] Would move {src} to {dst}")
             return True
 
         try:
-            shutil.move(src, dst)
-            return True
+            if self.filesystem:
+                self.filesystem.move(src, dst)
+                self.console.debug(f"IFileSystem.move called for {src} -> {dst}")
+                return True
+            else:
+                shutil.move(src, dst)
+                self.console.info(f"Moved {src} to {dst}")
+                return True
         except Exception as e:
-            if self.console:
-                self.console.log_message("ERROR", f"Failed to move {src} to {dst}: {e}")
+            self.console.error(f"Failed to move {src} to {dst}: {e}")
             return False

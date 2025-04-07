@@ -1,7 +1,14 @@
 import os
-import logging
+
 import tomllib
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError  # Import ValidationError
+from typing import TYPE_CHECKING
+
+# Import custom exceptions
+from errors import ConfigError
+
+if TYPE_CHECKING:
+    from ui import ConsoleManager
 
 
 # Constants - moved from main.py
@@ -43,101 +50,99 @@ class ServerSettings(BaseModel):
 class ConfigManager:
     """Manages loading and generating configuration files"""
 
-    def __init__(self, console=None):
-        """Initialize ConfigManager with default settings and console for output
-
-        Args:
-            console: ConsoleManager instance for output (optional)
-        """
-        self.settings = ServerSettings()
+    def __init__(self, console: "ConsoleManager"):  # Use type hinting
+        """Initialize ConfigManager with a ConsoleManager instance."""
+        self.settings = ServerSettings()  # Start with defaults
         self.console = console
-        self.logger = logging.getLogger("vs_manage")
+        # No direct logger instance needed here, use console for logging
 
     def load_config(self) -> ServerSettings:
         """Load configuration from TOML files using Pydantic for validation
 
         Returns:
-            ServerSettings: The loaded configuration settings
+            ServerSettings: The loaded configuration settings.
+
+        Raises:
+            ConfigError: If configuration loading or validation fails.
         """
         config_loaded = False
+        loaded_path = "Defaults"
 
         for config_file in CONFIG_FILES:
             if os.path.isfile(config_file):
+                self.console.debug(f"Attempting to load config: {config_file}")
                 try:
-                    # Attempt to read the TOML config file
                     with open(config_file, "rb") as f:
                         config_data = tomllib.load(f)
 
-                    # Check if config data was loaded
                     if config_data:
-                        # Create settings from the loaded data
                         try:
-                            self.settings = ServerSettings(**config_data)
-                            if self.console:
-                                self.console.print(
-                                    f"Loading configuration from {config_file}...",
-                                    style="cyan",
-                                )
-                            self.logger.info(f"Loaded configuration from {config_file}")
-                            config_loaded = True
-                            break
-                        except Exception as validation_error:
-                            if self.console:
-                                self.console.print(
-                                    f"Error validating configuration values: {validation_error}",
-                                    style="red",
-                                )
-                            self.logger.error(
-                                f"Configuration validation error: {validation_error}"
+                            # Validate and update settings
+                            new_settings = ServerSettings(**config_data)
+                            self.settings = new_settings  # Update instance settings
+                            self.console.info(
+                                f"Successfully loaded configuration from {config_file}"
                             )
-                except Exception as e:
-                    if self.console:
-                        self.console.print(
-                            f"Warning: Failed to load configuration from {config_file}: {e}",
-                            style="yellow",
-                        )
-                    self.logger.warning(
-                        f"Failed to load configuration from {config_file}: {e}"
+                            loaded_path = config_file
+                            config_loaded = True
+                            break  # Stop after loading the highest priority file
+                        except ValidationError as validation_error:
+                            # Raise a specific ConfigError for validation issues
+                            err_msg = f"Validation error in configuration file '{config_file}': {validation_error}"
+                            self.console.error(err_msg)
+                            raise ConfigError(err_msg) from validation_error
+                except OSError as e:
+                    # Log file read errors as warnings but continue trying others
+                    self.console.warning(
+                        f"Could not read config file '{config_file}': {e}"
                     )
+                except tomllib.TOMLDecodeError as e:
+                    # Raise a specific ConfigError for parsing issues
+                    err_msg = f"Error parsing TOML in config file '{config_file}': {e}"
+                    self.console.error(err_msg)
+                    raise ConfigError(err_msg) from e
+                except Exception as e:
+                    # Catch unexpected errors during loading
+                    err_msg = (
+                        f"Unexpected error loading config file '{config_file}': {e}"
+                    )
+                    self.console.error(err_msg, exc_info=True)
+                    raise ConfigError(err_msg) from e
+            else:
+                self.console.debug(f"Config file not found: {config_file}")
 
         if not config_loaded:
-            if self.console:
-                self.console.print(
-                    "No configuration file found, using default values.", style="yellow"
-                )
-            self.logger.info("Using default configuration values")
-            # Keep using the default ServerSettings that was created in __init__
+            self.console.info(
+                "No configuration file found or loaded. Using default settings."
+            )
+        else:
+            self.console.debug(f"Final configuration loaded from: {loaded_path}")
 
         return self.settings
 
     def generate_config_file(self) -> str:
-        """Generate a configuration file in accordance with XDG standards
+        """Generate a configuration file in the primary XDG config location.
 
         Returns:
-            str: Path to the generated configuration file
+            str: Path to the generated configuration file.
+
+        Raises:
+            ConfigError: If the directory or file cannot be created.
         """
-        # Determine the appropriate config location
         config_dir = os.path.dirname(XDG_CONFIG_PATH)
         config_file = XDG_CONFIG_PATH
+        self.console.info(f"Attempting to generate default config at: {config_file}")
 
-        # Create the config directory if it doesn't exist
-        if not os.path.exists(config_dir):
-            try:
-                os.makedirs(config_dir, exist_ok=True)
-                if self.console:
-                    self.console.print(
-                        f"Created configuration directory: {config_dir}", style="cyan"
-                    )
-            except Exception as e:
-                if self.console:
-                    self.console.print(
-                        f"Error creating directory {config_dir}: {e}", style="red"
-                    )
-                    self.console.print(
-                        "Falling back to current directory", style="yellow"
-                    )
-                config_file = "./vs_manage.toml"
+        # Create the config directory
+        try:
+            os.makedirs(config_dir, exist_ok=True)
+            self.console.debug(f"Ensured configuration directory exists: {config_dir}")
+        except OSError as e:
+            err_msg = f"Failed to create configuration directory '{config_dir}': {e}"
+            self.console.error(err_msg)
+            raise ConfigError(err_msg) from e
 
+        # Write the default config file
         try:
             with open(config_file, "w") as f:
                 f.write(
@@ -177,21 +182,22 @@ class ConfigManager:
                     f'game_version_api_url = "{self.settings.game_version_api_url}"\n'
                 )
 
-            if self.console:
-                self.console.print(
-                    f"Configuration file created: {config_file}", style="green"
-                )
-                self.console.print(
-                    "This file will be loaded automatically on next run.", style="cyan"
-                )
-
-            self.logger.info(f"Configuration file created: {config_file}")
+            self.console.info(
+                f"Successfully generated configuration file: {config_file}"
+            )
+            self.console.print(
+                f"Configuration file created: [bold cyan]{config_file}[/bold cyan]"
+            )
+            self.console.print(
+                "This file will be loaded automatically on the next run.", style="dim"
+            )
             return config_file
 
-        except Exception as e:
-            if self.console:
-                self.console.print(
-                    f"Error creating configuration file: {e}", style="red"
-                )
-            self.logger.error(f"Error creating configuration file: {e}")
-            return ""
+        except OSError as e:
+            err_msg = f"Failed to write configuration file '{config_file}': {e}"
+            self.console.error(err_msg)
+            raise ConfigError(err_msg) from e
+        except Exception as e:  # Catch any other unexpected write errors
+            err_msg = f"An unexpected error occurred while generating config file '{config_file}': {e}"
+            self.console.error(err_msg, exc_info=True)
+            raise ConfigError(err_msg) from e
