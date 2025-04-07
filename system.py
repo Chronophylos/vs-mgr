@@ -181,7 +181,7 @@ class SystemInterface:
             if owner:
                 self.run_chown(owner, directory, recursive=False)
 
-        except (ProcessError, FileSystemError, OSError, Exception) as e:
+        except (ProcessError, FileSystemError, OSError) as e:
             # Catch errors from run_with_sudo, run_chown, os.makedirs, or filesystem.mkdir
             err_msg = f"Failed to create or set owner for directory '{directory}': {e}"
             self.console.error(err_msg)
@@ -241,12 +241,12 @@ class SystemInterface:
                 self.run_with_sudo(cmd, check=True)  # Raises ProcessError on failure
                 self.console.info(f"{action_desc} successful (via process)")
 
-        except (ProcessError, FileSystemError, Exception) as e:
+        except (ProcessError, FileSystemError) as e:
             # Catch errors from run_with_sudo or filesystem.chown
             err_msg = f"{action_desc} failed: {e}"
             self.console.error(err_msg)
             # Re-raise as FileSystemError if it wasn't already
-            if isinstance(e, (FileSystemError, ProcessError)):
+            if isinstance(e, FileSystemError):
                 raise
             else:
                 raise FileSystemError(err_msg) from e

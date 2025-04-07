@@ -107,9 +107,7 @@ class UpdateManager:
         self.data_dir = settings.data_dir
         self.temp_dir = settings.temp_dir
         self.service_name = settings.service_name
-        # Format user/group string expected by IFileSystem.chown (user, group)
         self.server_user = settings.server_user  # Keep as single user string for now
-        # self.server_user_group = f"{settings.server_user}:{settings.server_user}" # Store combined if needed
 
         # State tracking
         self.server_stopped = False
@@ -750,7 +748,6 @@ class UpdateManager:
                         except (
                             FileSystemError,
                             NotImplementedError,
-                            Exception,
                         ) as check_err:
                             # Error checking dir, can't mark for deletion
                             self.console.warning(
@@ -780,7 +777,6 @@ class UpdateManager:
                         except (
                             FileSystemError,
                             NotImplementedError,
-                            Exception,
                         ) as del_err:
                             self.console.warning(
                                 f"Failed during deletion of extraneous directory '{dir_to_del}': {del_err}"

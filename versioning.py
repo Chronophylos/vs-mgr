@@ -352,7 +352,7 @@ class VersionChecker:
                 if not isinstance(data, dict):  # Basic validation
                     raise ValueError("API response is not a JSON object")
                 return data
-            except (json.JSONDecodeError, ValueError, Exception) as json_e:
+            except json.JSONDecodeError as json_e:
                 err_msg = f"Failed to parse JSON response from API: {json_e}"
                 self.console.error(err_msg)
                 raise VersioningError(err_msg) from json_e
@@ -496,7 +496,7 @@ class VersionChecker:
             if e.__cause__:
                 self.console.debug(f"Underlying jq error cause: {e.__cause__}")
             return None
-        except (IOError, json.JSONDecodeError, Exception) as e:
+        except (IOError, json.JSONDecodeError) as e:
             # Catch errors related to temp file or other issues
             self.console.warning(
                 f"Unexpected error during jq processing (temp file/other): {e}"

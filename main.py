@@ -310,9 +310,7 @@ def cmd_info(
     console.print(f"Backup Directory: {settings.backup_dir}")
 
     if detailed:
-        _display_detailed_info(
-            console, settings, service_mgr, filesystem, backup_manager
-        )
+        _display_detailed_info(console, settings, filesystem, backup_manager)
 
     return 0
 
@@ -320,7 +318,6 @@ def cmd_info(
 def _display_detailed_info(
     console: ConsoleManager,
     settings: ServerSettings,
-    service_mgr: ServiceManager,
     filesystem: IFileSystem,
     backup_manager: BackupManager,
 ):

@@ -7,6 +7,12 @@ import fnmatch
 from interfaces import IArchiver
 
 
+class SecurityError(Exception):
+    """Exception raised for security-related issues."""
+
+    pass
+
+
 class TarfileArchiver(IArchiver):
     """Implementation of IArchiver using tarfile."""
 
@@ -38,12 +44,12 @@ class TarfileArchiver(IArchiver):
                     for member in tar.getmembers():
                         member_path = os.path.join(path, member.name)
                         if not is_within_directory(path, member_path):
-                            raise Exception("Attempted path traversal in tar file")
+                            raise SecurityError("Attempted path traversal in tar file")
                     tar.extractall(path)
 
                 safe_extract(tar, str(dest_path))
             return True
-        except (tarfile.TarError, OSError, Exception) as e:
+        except (tarfile.TarError, OSError, SecurityError) as e:
             print(f"Error extracting archive {archive_path}: {e}")
             return False
 
