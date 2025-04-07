@@ -2,13 +2,13 @@ import re
 import subprocess
 import requests
 
-from vs_manager.errors import DependencyError
-from vs_manager.ui import ConsoleManager
-from vs_manager.system import SystemInterface
-from vs_manager.services import ServiceManager
-from vs_manager.versioning import VersionChecker
-from vs_manager.backup import BackupManager
-from vs_manager.filesystem import IFileSystem
+from vs_mgr.errors import DependencyError
+from vs_mgr.ui import ConsoleManager
+from vs_mgr.system import SystemInterface
+from vs_mgr.services import ServiceManager
+from vs_mgr.versioning import VersionChecker
+from vs_mgr.backup import BackupManager
+from vs_mgr.filesystem import IFileSystem
 
 
 def check_dependencies(system: SystemInterface, console: ConsoleManager) -> bool:

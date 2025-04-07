@@ -3,6 +3,7 @@ name = "vs-mgr"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
+authors = [{ name = "Chronophylos", email = "nikolai@chronophylos.com" }]
 requires-python = ">=3.12"
 dependencies = [
     "packaging>=24.2",
@@ -14,3 +15,10 @@ dependencies = [
 
 [dependency-groups]
 dev = ["ruff>=0.11.4"]
+
+[project.scripts]
+vs-mgr = "vs_mgr:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
