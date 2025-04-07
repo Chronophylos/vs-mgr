@@ -1,7 +1,6 @@
 import re
 import subprocess
 import requests
-from typing import Tuple
 
 from vs_manager.errors import DependencyError
 from vs_manager.ui import ConsoleManager
@@ -272,15 +271,15 @@ def _verify_update_url(
 
 def perform_update(
     update_mgr, version: str, skip_backup: bool, ignore_backup_failure: bool
-) -> Tuple[bool, int]:
+) -> int:
     """Execute the update process"""
     if not re.match(r"^\d+\.\d+\.\d+$", version):
         update_mgr.console.print(
             f"Error: Invalid version format: '{version}'. Expected format X.Y.Z",
             style="red",
         )
-        return False, 1
+        return 1
 
     # Execute update
     success, _ = update_mgr.perform_update(version, skip_backup, ignore_backup_failure)
-    return success, 0 if success else 1
+    return 0 if success else 1

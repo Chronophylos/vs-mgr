@@ -163,7 +163,7 @@ def process_command(args, components, settings):
             if args.max_backups is not None:
                 settings.max_backups = args.max_backups
 
-            success, result = perform_update(
+            result = perform_update(
                 components["update_mgr"],
                 args.version,
                 args.skip_backup,
