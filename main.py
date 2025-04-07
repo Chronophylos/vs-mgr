@@ -6,21 +6,21 @@ import subprocess
 import requests
 
 # Import our modules
-from config import ConfigManager, ServerSettings
-from errors import ConfigError, DependencyError, VSManagerError
-from ui import ConsoleManager
-from system import SystemInterface
-from services import ServiceManager
-from versioning import VersionChecker
-from backup import BackupManager
-from updater import UpdateManager
+from vs_manager.config import ConfigManager, ServerSettings
+from vs_manager.errors import ConfigError, DependencyError, VSManagerError
+from vs_manager.ui import ConsoleManager
+from vs_manager.system import SystemInterface
+from vs_manager.services import ServiceManager
+from vs_manager.versioning import VersionChecker
+from vs_manager.backup import BackupManager
+from vs_manager.updater import UpdateManager
 
 # Import interface implementations
-from process_runner import SubprocessProcessRunner
-from filesystem import OsFileSystem, IFileSystem
-from http_client import RequestsHttpClient
-from archiver import TarfileArchiver
-from compressor import ZstdCompressor
+from vs_manager.process_runner import SubprocessProcessRunner
+from vs_manager.filesystem import OsFileSystem, IFileSystem
+from vs_manager.http_client import RequestsHttpClient
+from vs_manager.archiver import TarfileArchiver
+from vs_manager.compressor import ZstdCompressor
 
 
 def main():
