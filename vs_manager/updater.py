@@ -305,7 +305,7 @@ class UpdateManager:
 
         # Verify download URL
         self.console.info(f"Verifying download URL for version {new_version}...")
-        if not self.version_checker._verify_download_url(download_url):
+        if not self.version_checker.verify_download_url(download_url):
             raise VersioningError(
                 f"Download URL verification failed for {download_url}. Check version number and network."
             )
@@ -401,7 +401,7 @@ class UpdateManager:
             DownloadError: If the download fails.
             UpdateError: For other unexpected errors.
         """
-        self.archive_name = f"vs_server_linux-x64_{version}.tar.gz"  # Standard name
+        self.archive_name = self.settings.server_archive_format.format(version=version)
         archive_path = os.path.join(self.temp_dir, self.archive_name)
         self.console.info(
             f"Downloading server archive: {self.archive_name} from {download_url}"
@@ -444,8 +444,10 @@ class UpdateManager:
             FileSystemError: For underlying filesystem issues during extraction.
         """
         extract_base_dir = os.path.join(self.temp_dir, "extracted")
-        # The archive typically extracts into a subdir named 'vintagestory'
-        expected_extracted_path = os.path.join(extract_base_dir, "vintagestory")
+        # The archive extracts into a subdirectory defined in settings
+        expected_extracted_path = os.path.join(
+            extract_base_dir, self.settings.extracted_dir_name
+        )
 
         self.console.info(
             f"Extracting archive '{os.path.basename(archive_path)}' to '{extract_base_dir}'"

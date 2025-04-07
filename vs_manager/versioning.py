@@ -187,8 +187,8 @@ class VersionChecker:
 
             # Verify that this version has a downloadable server package
             download_url = self.build_download_url(latest_version, channel)
-            if not self._verify_download_url(download_url):
-                # Error logged by _verify_download_url
+            if not self.verify_download_url(download_url):
+                # Error logged by verify_download_url
                 return None
 
             # Return version string *without* 'v' prefix as per API structure
@@ -261,6 +261,45 @@ class VersionChecker:
         url = f"{self.downloads_base_url}/{filename}"
         self.console.debug(f"Constructed download URL: {url}")
         return url
+
+    def verify_download_url(self, download_url: str) -> bool:
+        """Verifies if a download URL likely exists by sending a HEAD request.
+
+        Args:
+            download_url: The URL to check.
+
+        Returns:
+            True if the URL returns a 2xx status code to a HEAD request, False otherwise.
+
+        Raises:
+            VersioningError: If the HTTP request itself fails unexpectedly.
+        """
+        self.console.debug(
+            f"Verifying download URL availability (HEAD request): {download_url}"
+        )
+        try:
+            response = self.http_client.head(download_url)
+            if response.status_code == 200:
+                self.console.debug(
+                    f"Download URL verified successfully (Status: {response.status_code})."
+                )
+                return True
+            else:
+                self.console.warning(
+                    f"Download URL verification failed. Status code {response.status_code} for URL: {download_url}"
+                )
+                return False
+        except requests.exceptions.RequestException as e:
+            self.console.warning(
+                f"HTTP request failed during download URL verification: {e}"
+            )
+            return False
+        except Exception as e:
+            self.console.error(
+                f"Unexpected error verifying download URL '{download_url}': {e}",
+                exc_info=True,
+            )
+            return False
 
     # --- Private Helper Methods --- #
 
@@ -543,42 +582,3 @@ class VersionChecker:
                 f"Could not find '{channel}' version in API response structure."
             )
             return None
-
-    def _verify_download_url(self, download_url: str) -> bool:
-        """Verifies if a download URL likely exists by sending a HEAD request.
-
-        Args:
-            download_url: The URL to check.
-
-        Returns:
-            True if the URL returns a 2xx status code to a HEAD request, False otherwise.
-
-        Raises:
-            VersioningError: If the HTTP request itself fails unexpectedly.
-        """
-        self.console.debug(
-            f"Verifying download URL availability (HEAD request): {download_url}"
-        )
-        try:
-            response = self.http_client.head(download_url)
-            if response.status_code == 200:
-                self.console.debug(
-                    f"Download URL verified successfully (Status: {response.status_code})."
-                )
-                return True
-            else:
-                self.console.warning(
-                    f"Download URL verification failed. Status code {response.status_code} for URL: {download_url}"
-                )
-                return False
-        except requests.exceptions.RequestException as e:
-            self.console.warning(
-                f"HTTP request failed during download URL verification: {e}"
-            )
-            return False
-        except Exception as e:
-            self.console.error(
-                f"Unexpected error verifying download URL '{download_url}': {e}",
-                exc_info=True,
-            )
-            return False

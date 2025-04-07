@@ -53,6 +53,10 @@ class ServerSettings(BaseModel):
     downloads_base_url: str = "https://cdn.vintagestory.at/gamefiles"
     game_version_api_url: str = "https://mods.vintagestory.at/api/gameversions"
 
+    # Archive settings
+    server_archive_format: str = "vs_server_linux-x64_{version}.tar.gz"
+    extracted_dir_name: str = "vintagestory"
+
 
 # --- Configuration Management ---
 class ConfigManager:
@@ -193,6 +197,10 @@ max_backups = {self.settings.max_backups}
 # Version checking settings
 downloads_base_url = "{self.settings.downloads_base_url}"
 game_version_api_url = "{self.settings.game_version_api_url}"
+
+# Archive settings
+server_archive_format = "{self.settings.server_archive_format}"
+extracted_dir_name = "{self.settings.extracted_dir_name}"
 """
 
         try:
