@@ -49,6 +49,14 @@ def main():
         console_mgr.info("Sample configuration file generated. Exiting.")
         return 0
 
+    # Exit early if just showing help
+    if args.command is None:
+        # Just show help and exit
+        setup_argument_parser().print_help()
+        return 0
+
+    # From here, we're executing a command, so do full initialization
+
     # Load configuration
     try:
         settings = config_mgr.load_config()
@@ -65,11 +73,9 @@ def main():
     # Initialize interfaces and components
     components = initialize_components(console_mgr, settings, dry_run)
 
-    # Check dependencies only if a command is provided
-    # (argparse handles exit for -h/--help before this)
-    if args.command is not None:
-        if not check_dependencies(components["system"], console_mgr):
-            return 1
+    # Check dependencies
+    if not check_dependencies(components["system"], console_mgr):
+        return 1
 
     # Set up signal handlers
     setup_signal_handlers(components.get("update_mgr"))
@@ -188,9 +194,6 @@ def process_command(args, components, settings):
                 console, components["version_checker"], args.channel
             )
 
-        elif args.command is None:
-            setup_argument_parser().print_help()
-
         else:
             console.error(f"Unknown command: {args.command}")
             setup_argument_parser().print_help()
@@ -203,11 +206,9 @@ def process_command(args, components, settings):
         console.exception(f"An unexpected error occurred: {e}")
         result = 1
     finally:
-        # Perform cleanup only if a command was actually processed (not just help shown)
-        if args.command is not None:
-            console.info("Performing final cleanup...")
-            if "update_mgr" in components:
-                components["update_mgr"]._cleanup()
+        console.info("Performing final cleanup...")
+        if "update_mgr" in components:
+            components["update_mgr"]._cleanup()
 
     return result
 
