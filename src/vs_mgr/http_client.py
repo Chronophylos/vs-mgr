@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 import shutil
 
-from interfaces import IHttpClient
+from vs_mgr.interfaces import IHttpClient
 
 
 class RequestsHttpClient(IHttpClient):

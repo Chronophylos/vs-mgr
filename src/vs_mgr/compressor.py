@@ -3,7 +3,7 @@ import zstandard as zstd
 from pathlib import Path
 from typing import Union
 
-from interfaces import ICompressor
+from vs_mgr.interfaces import ICompressor
 
 
 class ZstdCompressor(ICompressor):

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Union, List
 import fnmatch
 
-from interfaces import IArchiver
+from vs_mgr.interfaces import IArchiver
 
 
 class SecurityError(Exception):

@@ -6,11 +6,10 @@ import tomllib
 from pydantic import BaseModel, ValidationError
 from typing import TYPE_CHECKING
 
-# Import custom exceptions
-from errors import ConfigError
+from vs_mgr.errors import ConfigError
 
 if TYPE_CHECKING:
-    from ui import ConsoleManager
+    from vs_mgr.ui import ConsoleManager
 
 
 # --- Constants ---

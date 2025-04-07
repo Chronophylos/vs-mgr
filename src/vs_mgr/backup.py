@@ -10,13 +10,13 @@ import tempfile
 import traceback
 from typing import Optional, List, TYPE_CHECKING, Tuple
 
-from interfaces import IFileSystem, IArchiver, ICompressor, IProcessRunner
-from errors import BackupError, FileSystemError, ProcessError
+from vs_mgr.interfaces import IFileSystem, IArchiver, ICompressor, IProcessRunner
+from vs_mgr.errors import BackupError, FileSystemError, ProcessError
 
 if TYPE_CHECKING:
-    from ui import ConsoleManager
-    from config import ServerSettings
-    from system import SystemInterface  # Needed for dry_run
+    from vs_mgr.ui import ConsoleManager
+    from vs_mgr.config import ServerSettings
+    from vs_mgr.system import SystemInterface  # Needed for dry_run
 
 
 class BackupManager:

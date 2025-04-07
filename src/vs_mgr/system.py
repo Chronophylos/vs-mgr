@@ -10,11 +10,11 @@ import os
 import shutil
 import subprocess
 from typing import List, Optional, Union, TYPE_CHECKING
-from interfaces import IProcessRunner, IFileSystem
-from errors import ProcessError, FileSystemError
+from vs_mgr.interfaces import IProcessRunner, IFileSystem
+from vs_mgr.errors import ProcessError, FileSystemError
 
 if TYPE_CHECKING:
-    from ui import ConsoleManager
+    from vs_mgr.ui import ConsoleManager
 
 
 class SystemInterface:

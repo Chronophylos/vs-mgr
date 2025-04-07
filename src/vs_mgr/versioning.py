@@ -7,19 +7,18 @@ installed server version by checking log files.
 
 import os
 import re
-import json  # For parsing API response without jq
-import requests  # For exception type hinting if needed
-import shutil  # For shutil.which
-import tempfile  # For temporary file handling
+import json
+import requests
+import shutil
+import tempfile
 from typing import Optional, Dict, TYPE_CHECKING, Any
-from packaging import version as packaging_version  # Rename to avoid conflict
-
-from interfaces import IHttpClient, IProcessRunner  # Add IProcessRunner for jq
-from errors import VersioningError, ProcessError
+from packaging import version as packaging_version
+from vs_mgr.interfaces import IHttpClient, IProcessRunner
+from vs_mgr.errors import VersioningError, ProcessError
 
 if TYPE_CHECKING:
-    from ui import ConsoleManager
-    from config import ServerSettings  # Use ServerSettings for consistency
+    from vs_mgr.ui import ConsoleManager
+    from vs_mgr.config import ServerSettings
 
 
 class VersionChecker:

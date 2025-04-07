@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Union, List, Tuple, Optional
 import subprocess
 
-from interfaces import IFileSystem, IProcessRunner
+from vs_mgr.interfaces import IFileSystem, IProcessRunner
 
 
 class OsFileSystem(IFileSystem):

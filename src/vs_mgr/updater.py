@@ -10,11 +10,11 @@ HTTP requests, filesystem operations, and archiving.
 
 import os
 import time
-import traceback  # Add traceback import
+import traceback
 from typing import Optional, Tuple, TYPE_CHECKING
 
-from interfaces import IHttpClient, IFileSystem, IArchiver, IProcessRunner
-from errors import (
+from vs_mgr.interfaces import IHttpClient, IFileSystem, IArchiver, IProcessRunner
+from vs_mgr.errors import (
     UpdateError,
     BackupError,
     ServiceError,
@@ -27,12 +27,12 @@ from errors import (
 
 if TYPE_CHECKING:
     # Use full paths for clarity if needed, or keep as is if unambiguous
-    from system import SystemInterface
-    from services import ServiceManager
-    from backup import BackupManager
-    from versioning import VersionChecker
-    from ui import ConsoleManager
-    from config import ServerSettings
+    from vs_mgr.system import SystemInterface
+    from vs_mgr.services import ServiceManager
+    from vs_mgr.backup import BackupManager
+    from vs_mgr.versioning import VersionChecker
+    from vs_mgr.ui import ConsoleManager
+    from vs_mgr.config import ServerSettings
 
 
 class UpdateManager:

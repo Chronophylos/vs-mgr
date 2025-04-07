@@ -3,14 +3,12 @@
 import time
 from typing import TYPE_CHECKING, Literal
 
-from interfaces import IProcessRunner
-
-# Import specific errors
-from errors import ServiceError, ProcessError
+from vs_mgr.interfaces import IProcessRunner
+from vs_mgr.errors import ServiceError, ProcessError
 
 if TYPE_CHECKING:
-    from system import SystemInterface
-    from ui import ConsoleManager
+    from vs_mgr.system import SystemInterface
+    from vs_mgr.ui import ConsoleManager
 
 # Define a type for service status
 ServiceStatus = Literal["running", "stopped", "not-found", "error"]

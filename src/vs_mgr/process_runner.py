@@ -2,7 +2,7 @@ import subprocess
 import os
 from typing import List, Optional, Any
 
-from interfaces import IProcessRunner
+from vs_mgr.interfaces import IProcessRunner
 
 
 class SubprocessProcessRunner(IProcessRunner):
