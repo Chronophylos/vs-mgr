@@ -1,5 +1,4 @@
 import argparse
-import os
 import re
 import signal
 import sys
@@ -18,7 +17,7 @@ from updater import UpdateManager
 
 # Import interface implementations
 from process_runner import SubprocessProcessRunner
-from filesystem import OsFileSystem
+from filesystem import OsFileSystem, IFileSystem
 from http_client import RequestsHttpClient
 from archiver import TarfileArchiver
 from compressor import ZstdCompressor
@@ -141,8 +140,8 @@ def main():
     version_checker = VersionChecker(
         server_dir=settings.server_dir,
         http_client=http_client,
-        process_runner=process_runner,
         console=console_mgr,
+        settings=settings,
     )
 
     backup_mgr = BackupManager(
@@ -174,7 +173,7 @@ def main():
     def signal_handler(sig, frame):
         console_mgr.warning("Received interrupt signal, attempting cleanup...")
         if "update_mgr" in locals():
-            update_mgr.cleanup()
+            update_mgr._cleanup()
         sys.exit(1)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -205,7 +204,13 @@ def main():
         elif args.command == "info":
             # Show server information
             result = cmd_info(
-                console_mgr, settings, service_mgr, version_checker, args.detailed
+                console_mgr,
+                settings,
+                service_mgr,
+                version_checker,
+                backup_mgr,
+                filesystem,
+                args.detailed,
             )
 
         elif args.command == "check-version":
@@ -231,7 +236,7 @@ def main():
     finally:
         console_mgr.info("Performing final cleanup...")
         if "update_mgr" in locals():
-            update_mgr.cleanup()
+            update_mgr._cleanup()
 
     return result
 
@@ -240,7 +245,6 @@ def check_dependencies(system: SystemInterface, console: ConsoleManager) -> bool
     """Check if required dependencies are installed"""
     critical_deps = ["wget", "tar", "systemctl"]
     recommended_deps = ["rsync"]
-    opt_deps = ["dotnet", "jq"]
     missing_critical = []
     missing_recommended = []
 
@@ -278,6 +282,8 @@ def cmd_info(
     settings: ServerSettings,
     service_mgr: ServiceManager,
     version_checker: VersionChecker,
+    backup_manager: BackupManager,
+    filesystem: IFileSystem,
     detailed: bool = False,
 ) -> int:
     """Display information about the current installation"""
@@ -304,69 +310,72 @@ def cmd_info(
     console.print(f"Backup Directory: {settings.backup_dir}")
 
     if detailed:
-        _display_detailed_info(console, settings, service_mgr)
+        _display_detailed_info(
+            console, settings, service_mgr, filesystem, backup_manager
+        )
 
     return 0
 
 
 def _display_detailed_info(
-    console: ConsoleManager, settings: ServerSettings, service_mgr: ServiceManager
+    console: ConsoleManager,
+    settings: ServerSettings,
+    service_mgr: ServiceManager,
+    filesystem: IFileSystem,
+    backup_manager: BackupManager,
 ):
     """Display detailed information about the server installation"""
     console.print("\n--- Detailed Information ---", style="cyan")
 
     # Server files size
-    if os.path.isdir(settings.server_dir):
+    if filesystem.isdir(settings.server_dir):
         try:
-            server_size = subprocess.run(
-                ["du", "-sh", settings.server_dir],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            ).stdout.split()[0]
-            console.print(f"Server files size:  {server_size}")
-        except Exception:
+            server_size_bytes = filesystem.calculate_dir_size(settings.server_dir)
+            server_size_human = backup_manager._format_size(server_size_bytes)
+            console.print(f"Server files size:  {server_size_human}")
+        except Exception as e:
+            console.warning(f"Could not calculate server directory size: {e}")
             console.print("Server files size:  N/A")
+    else:
+        console.print("Server files size:  N/A (Directory not found)")
 
     # Data directory size
-    if os.path.isdir(settings.data_dir):
+    if filesystem.isdir(settings.data_dir):
         try:
-            data_size = subprocess.run(
-                ["du", "-sh", settings.data_dir],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            ).stdout.split()[0]
-            console.print(f"Data directory size: {data_size}")
-        except Exception:
+            data_size_bytes = filesystem.calculate_dir_size(settings.data_dir)
+            data_size_human = backup_manager._format_size(data_size_bytes)
+            console.print(f"Data directory size: {data_size_human}")
+        except Exception as e:
+            console.warning(f"Could not calculate data directory size: {e}")
             console.print("Data directory size: N/A")
+    else:
+        console.print("Data directory size: N/A (Directory not found)")
 
-    # Backup information
-    if os.path.isdir(settings.backup_dir):
-        backup_count = 0
+    # Backup information (using BackupManager)
+    if filesystem.isdir(settings.backup_dir):
         try:
-            backup_files = [
-                f
-                for f in os.listdir(settings.backup_dir)
-                if f.startswith("vs_data_backup_") and f.endswith(".tar.zst")
-            ]
-            backup_count = len(backup_files)
-
-            backup_size = subprocess.run(
-                ["du", "-sh", settings.backup_dir],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            ).stdout.split()[0]
+            backup_details = backup_manager.list_backups()
+            backup_count = len(backup_details)
+            # Calculate total backup dir size using filesystem interface
+            backup_dir_size_bytes = filesystem.calculate_dir_size(settings.backup_dir)
+            backup_dir_size_human = backup_manager._format_size(backup_dir_size_bytes)
 
             console.print(f"Backup count:       {backup_count}")
-            console.print(f"Backup dir size:    {backup_size}")
-        except Exception:
-            console.print(f"Backup count:       {backup_count}")
+            console.print(f"Backup dir size:    {backup_dir_size_human}")
+            # Optionally display last backup details
+            if backup_details:
+                latest_backup = backup_details[0]
+                console.print(
+                    f"Latest Backup:      {latest_backup[0]} ({latest_backup[2]})"
+                )
+
+        except Exception as e:
+            console.warning(f"Could not retrieve backup information: {e}")
+            console.print("Backup count:       N/A")
             console.print("Backup dir size:    N/A")
+    else:
+        console.print("Backup count:       0 (Directory not found)")
+        console.print("Backup dir size:    N/A")
 
     # Service status
     _display_service_status(console, settings.service_name)

@@ -1,7 +1,9 @@
+"""Manages loading and validation of server configuration from TOML files."""
+
 import os
 
 import tomllib
-from pydantic import BaseModel, ValidationError  # Import ValidationError
+from pydantic import BaseModel, ValidationError
 from typing import TYPE_CHECKING
 
 # Import custom exceptions
@@ -11,20 +13,25 @@ if TYPE_CHECKING:
     from ui import ConsoleManager
 
 
-# Constants - moved from main.py
+# --- Constants ---
 # Get XDG config directory
 XDG_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
 XDG_CONFIG_PATH = os.path.join(XDG_CONFIG_HOME, "vs_manage", "config.toml")
 
+# Configuration file search paths (from lowest to highest priority)
 CONFIG_FILES = [
-    "./vs_manage.toml",  # Local directory (lowest priority)
-    XDG_CONFIG_PATH,  # User config directory (XDG standard)
-    "/etc/vs_manage.toml",  # System-wide config (highest priority)
+    "./vs_manage.toml",
+    XDG_CONFIG_PATH,
+    "/etc/vs_manage.toml",
 ]
 
 
+# --- Pydantic Model ---
 class ServerSettings(BaseModel):
-    """Server configuration settings validated with Pydantic"""
+    """Defines the structure and default values for server configuration.
+
+    Uses Pydantic for data validation.
+    """
 
     # Service settings
     service_name: str = "vintagestoryserver"
@@ -47,26 +54,38 @@ class ServerSettings(BaseModel):
     game_version_api_url: str = "https://mods.vintagestory.at/api/gameversions"
 
 
+# --- Configuration Management ---
 class ConfigManager:
-    """Manages loading and generating configuration files"""
+    """Handles loading configuration from files and generating a default config.
 
-    def __init__(self, console: "ConsoleManager"):  # Use type hinting
-        """Initialize ConfigManager with a ConsoleManager instance."""
-        self.settings = ServerSettings()  # Start with defaults
+    Attributes:
+        settings (ServerSettings): The validated configuration settings.
+        console (ConsoleManager): Instance for logging and user output.
+    """
+
+    def __init__(self, console: "ConsoleManager"):
+        """Initializes the ConfigManager.
+
+        Args:
+            console: An instance of ConsoleManager for logging.
+        """
+        self.settings = ServerSettings()  # Start with Pydantic defaults
         self.console = console
-        # No direct logger instance needed here, use console for logging
+        # Logging is handled via the passed ConsoleManager instance
 
     def load_config(self) -> ServerSettings:
-        """Load configuration from TOML files using Pydantic for validation
+        """Loads configuration from the first found TOML file in the search path.
+
+        It merges the loaded settings over the defaults and validates them.
 
         Returns:
-            ServerSettings: The loaded configuration settings.
+            The validated ServerSettings instance.
 
         Raises:
-            ConfigError: If configuration loading or validation fails.
+            ConfigError: If a config file is found but is invalid (parsing error,
+                         validation error) or if there's an unexpected issue loading it.
         """
         config_loaded = False
-        loaded_path = "Defaults"
 
         for config_file in CONFIG_FILES:
             if os.path.isfile(config_file):
@@ -83,7 +102,6 @@ class ConfigManager:
                             self.console.info(
                                 f"Successfully loaded configuration from {config_file}"
                             )
-                            loaded_path = config_file
                             config_loaded = True
                             break  # Stop after loading the highest priority file
                         except ValidationError as validation_error:
@@ -92,12 +110,13 @@ class ConfigManager:
                             self.console.error(err_msg)
                             raise ConfigError(err_msg) from validation_error
                 except OSError as e:
-                    # Log file read errors as warnings but continue trying others
+                    # File read errors are logged but don't stop the process
+                    # unless it's the only potential config source that fails.
                     self.console.warning(
                         f"Could not read config file '{config_file}': {e}"
                     )
                 except tomllib.TOMLDecodeError as e:
-                    # Raise a specific ConfigError for parsing issues
+                    # Invalid TOML syntax
                     err_msg = f"Error parsing TOML in config file '{config_file}': {e}"
                     self.console.error(err_msg)
                     raise ConfigError(err_msg) from e
@@ -106,7 +125,9 @@ class ConfigManager:
                     err_msg = (
                         f"Unexpected error loading config file '{config_file}': {e}"
                     )
-                    self.console.error(err_msg, exc_info=True)
+                    self.console.error(
+                        err_msg, exc_info=True
+                    )  # Include traceback for unexpected errors
                     raise ConfigError(err_msg) from e
             else:
                 self.console.debug(f"Config file not found: {config_file}")
@@ -115,19 +136,22 @@ class ConfigManager:
             self.console.info(
                 "No configuration file found or loaded. Using default settings."
             )
-        else:
-            self.console.debug(f"Final configuration loaded from: {loaded_path}")
+        # else: # Debug log seems redundant if info log above states success
+        # self.console.debug(f"Final configuration loaded from: {loaded_path}")
 
         return self.settings
 
     def generate_config_file(self) -> str:
-        """Generate a configuration file in the primary XDG config location.
+        """Generates a default configuration file in the primary XDG location.
+
+        Creates the necessary directory if it doesn't exist.
 
         Returns:
-            str: Path to the generated configuration file.
+            The absolute path to the generated configuration file.
 
         Raises:
-            ConfigError: If the directory or file cannot be created.
+            ConfigError: If the directory or file cannot be created due to permissions
+                         or other OS-level issues.
         """
         config_dir = os.path.dirname(XDG_CONFIG_PATH)
         config_file = XDG_CONFIG_PATH
@@ -142,45 +166,38 @@ class ConfigManager:
             self.console.error(err_msg)
             raise ConfigError(err_msg) from e
 
-        # Write the default config file
+        # Write the default config file content
+        config_content = f"""# Vintage Story Server Management Script - Configuration File
+# This file was generated automatically. You can edit it to change settings.
+# Configuration files are loaded in this priority order:
+#   1. /etc/vs_manage.toml
+#   2. {XDG_CONFIG_PATH}
+#   3. ./vs_manage.toml
+
+# Service settings
+service_name = "{self.settings.service_name}"
+
+# Directory settings
+server_dir = "{self.settings.server_dir}"
+data_dir = "{self.settings.data_dir}"
+temp_dir = "{self.settings.temp_dir}"
+backup_dir = "{self.settings.backup_dir}"
+log_dir = "{self.settings.log_dir}"
+
+# User settings
+server_user = "{self.settings.server_user}"
+
+# Backup settings
+max_backups = {self.settings.max_backups}
+
+# Version checking settings
+downloads_base_url = "{self.settings.downloads_base_url}"
+game_version_api_url = "{self.settings.game_version_api_url}"
+"""
+
         try:
-            with open(config_file, "w") as f:
-                f.write(
-                    "# Vintage Story Server Management Script - Configuration File\n"
-                )
-                f.write(
-                    "# This file was generated automatically. You can edit it to change settings.\n"
-                )
-                f.write("# Other possible configuration locations:\n")
-                f.write("#   ./vs_manage.toml\n")
-                f.write("#   /etc/vs_manage.toml\n\n")
-
-                # Service settings
-                f.write("# Service settings\n")
-                f.write(f'service_name = "{self.settings.service_name}"\n\n')
-
-                # Directory settings
-                f.write("# Directory settings\n")
-                f.write(f'server_dir = "{self.settings.server_dir}"\n')
-                f.write(f'data_dir = "{self.settings.data_dir}"\n')
-                f.write(f'temp_dir = "{self.settings.temp_dir}"\n')
-                f.write(f'backup_dir = "{self.settings.backup_dir}"\n')
-                f.write(f'log_dir = "{self.settings.log_dir}"\n\n')
-
-                # User settings
-                f.write("# User settings\n")
-                f.write(f'server_user = "{self.settings.server_user}"\n\n')
-
-                # Backup settings
-                f.write("# Backup settings\n")
-                f.write(f"max_backups = {self.settings.max_backups}\n\n")
-
-                # Version checking settings
-                f.write("# Version checking settings\n")
-                f.write(f'downloads_base_url = "{self.settings.downloads_base_url}"\n')
-                f.write(
-                    f'game_version_api_url = "{self.settings.game_version_api_url}"\n'
-                )
+            with open(config_file, "w", encoding="utf-8") as f:
+                f.write(config_content)
 
             self.console.info(
                 f"Successfully generated configuration file: {config_file}"
@@ -199,5 +216,5 @@ class ConfigManager:
             raise ConfigError(err_msg) from e
         except Exception as e:  # Catch any other unexpected write errors
             err_msg = f"An unexpected error occurred while generating config file '{config_file}': {e}"
-            self.console.error(err_msg, exc_info=True)
+            self.console.error(err_msg, exc_info=True)  # Include traceback
             raise ConfigError(err_msg) from e

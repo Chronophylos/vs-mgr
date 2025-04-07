@@ -1,3 +1,5 @@
+"""Provides a centralized manager for console output and logging using the Rich library."""
+
 import logging
 import os
 from typing import Optional
@@ -6,125 +8,184 @@ from rich.logging import RichHandler
 
 
 class ConsoleManager:
-    """Manages console output and logging with rich formatting"""
+    """Manages console output and logging configuration using Rich.
+
+    Handles setting up both console (Rich) and optional file logging handlers.
+    Provides wrapper methods for logging at different levels and direct printing.
+
+    Attributes:
+        console (Console): The Rich Console instance for output.
+        dry_run (bool): If True, indicates dry-run mode, affecting logging setup.
+        log_dir (Optional[str]): The directory designated for log files.
+        logger (logging.Logger): The logger instance used for logging messages.
+    """
 
     def __init__(self, dry_run: bool = False):
-        """Initialize ConsoleManager. Logging is set up separately via setup_logging."""
+        """Initializes the ConsoleManager.
+
+        Sets up a basic Rich handler immediately, which can be overridden by
+        calling setup_logging later.
+
+        Args:
+            dry_run (bool): Whether the application is running in dry-run mode.
+        """
         self.console = Console()
         self.dry_run = dry_run
         self.log_dir: Optional[str] = None
-        self.logger = logging.getLogger("vs_manage")  # Get logger instance
+        self.logger = logging.getLogger("vs_manage")  # Use a named logger
         self._logging_configured = False
 
-        # Basic config in case setup_logging isn't called immediately
+        # Basic console config in case setup_logging isn't called or fails
+        # This ensures self.console is always usable.
         logging.basicConfig(
-            level=logging.INFO,
-            handlers=[RichHandler(rich_tracebacks=True, console=self.console)],
+            level=logging.WARNING,  # Default to WARNING if not configured
+            handlers=[
+                RichHandler(rich_tracebacks=True, console=self.console, show_path=False)
+            ],
+            force=True,  # Override any root logger config from libraries
         )
+        self.logger.setLevel(logging.INFO)  # Default level for our logger
 
-    def setup_logging(self, log_dir: Optional[str] = None):
-        """Set up logging configuration, potentially with a file handler.
+    def setup_logging(
+        self, log_dir: Optional[str] = None, log_level: int = logging.INFO
+    ):
+        """Configures logging handlers (console and optional file).
+
+        Removes existing handlers associated with this logger and the root logger
+        to ensure a clean setup. Configures console logging using RichHandler
+        and adds a FileHandler if `log_dir` is provided and not in dry-run mode.
 
         Args:
-            log_dir: Directory to store log files (optional). If provided, enables file logging.
+            log_dir: The directory to store log files. If None, only console logging is used.
+            log_level: The minimum logging level (e.g., logging.INFO, logging.DEBUG).
+                     Defaults to logging.INFO.
         """
         if self._logging_configured and self.log_dir == log_dir:
-            # Avoid redundant configuration if called multiple times with same dir
+            self.logger.debug(
+                f"Logging already configured for {log_dir}. Skipping setup."
+            )
             return
 
         self.log_dir = log_dir
         log_file = None
-        handlers = []
+        handlers: list[logging.Handler] = []  # Explicit type hint
 
-        # Console Handler (always add)
-        handlers.append(
-            RichHandler(rich_tracebacks=True, console=self.console, show_path=False)
+        # --- Console Handler (Always Active) ---
+        console_handler = RichHandler(
+            rich_tracebacks=True,
+            console=self.console,
+            show_path=False,
+            level=log_level,  # Set level for the handler
         )
+        handlers.append(console_handler)
 
-        # File Handler (add if log_dir is provided and not dry run)
+        # --- File Handler (Conditional) ---
         if self.log_dir and not self.dry_run:
             log_file = os.path.join(self.log_dir, "vs_manage.log")
             try:
                 os.makedirs(self.log_dir, exist_ok=True)
-                handlers.append(logging.FileHandler(log_file))
-            except Exception as e:
-                self.console.print(
-                    f"[yellow]Warning:[/yellow] Could not create log directory or file {log_file}: {e}",
+                file_handler = logging.FileHandler(log_file, encoding="utf-8")
+                # Basic formatter for the file to keep it clean
+                formatter = logging.Formatter(
+                    "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s"
                 )
+                file_handler.setFormatter(formatter)
+                file_handler.setLevel(log_level)  # Set level for the handler
+                handlers.append(file_handler)
+            except OSError as e:
+                # Use logger.warning here instead of print, after basic config
+                self.logger.warning(
+                    f"Could not create log directory or file '{log_file}': {e}. File logging disabled."
+                )
+                log_file = None  # Ensure log_file reflects the failure
 
-        # Apply new configuration
-        # Remove existing handlers attached to the root logger or our specific logger
+        # --- Apply Configuration ---
+        # Clear existing handlers from our logger AND the root logger to avoid duplication
+        # or interference from libraries that configure the root logger.
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
-        for handler in self.logger.handlers[:]:
-            self.logger.removeHandler(
-                handler
-            )  # Remove handlers specific to our logger too
 
-        logging.basicConfig(
-            level=logging.INFO,  # Set base level for root logger
-            format="%(asctime)s [%(levelname)-8s] %(message)s",  # Format for file logger
-            handlers=handlers,
-            force=True,  # Override existing config
-        )
+        # Configure our specific logger
+        self.logger.setLevel(log_level)
+        for handler in handlers:
+            self.logger.addHandler(handler)
 
-        # Set level specifically for our logger if needed (e.g., DEBUG)
-        # For now, it inherits INFO from root. Can be made configurable later.
-        # self.logger.setLevel(logging.DEBUG)
-
-        self.logger.propagate = False  # Prevent messages from propagating to the root logger if it has handlers
+        self.logger.propagate = False  # Crucial: Prevent messages flowing to root
 
         self._logging_configured = True
 
+        # --- Post-Setup Logging ---
         if self.dry_run:
-            self.info("[DRY RUN MODE] Simulating operations without making changes")
+            self.info("[DRY RUN MODE] Simulation active. No changes will be made.")
         elif log_file:
-            self.debug(
-                f"Logging initialized. Console and file ({log_file}) handlers active."
+            self.info(
+                f"Logging initialized (Level: {logging.getLevelName(log_level)}). Output to console and file: {log_file}"
             )
         else:
-            self.debug("Logging initialized. Console handler active.")
+            self.info(
+                f"Logging initialized (Level: {logging.getLevelName(log_level)}). Output to console only."
+            )
 
-    def print(self, message: str, style: Optional[str] = None, **kwargs):
-        """Print a message directly to the console with optional styling.
-           Use this for direct user feedback not necessarily meant for logs.
+    def print(
+        self,
+        *objects: object,
+        sep: str = " ",
+        end: str = "\n",
+        style: Optional[str] = None,
+        **kwargs,
+    ):
+        """Prints objects directly to the console using Rich, bypassing logging.
+
+        Useful for immediate user feedback that shouldn't clutter logs.
+        Mimics the built-in print function signature more closely.
 
         Args:
-            message: The message to print
-            style: Rich style string (optional)
-            **kwargs: Additional keyword arguments for Console.print
+            *objects: Objects to print.
+            sep: Separator between objects.
+            end: String appended after the last object.
+            style: Rich style string (optional).
+            **kwargs: Additional keyword arguments passed to `rich.console.Console.print`.
         """
-        self.console.print(message, style=style, **kwargs)
+        self.console.print(*objects, sep=sep, end=end, style=style, **kwargs)
 
-    # --- Logging Methods ---
+    # --- Logging Methods (Wrappers around self.logger) ---
 
     def debug(self, message: str, **kwargs):
-        """Log a DEBUG level message."""
+        """Logs a message with level DEBUG on the 'vs_manage' logger."""
         self.logger.debug(message, **kwargs)
 
     def info(self, message: str, **kwargs):
-        """Log an INFO level message."""
+        """Logs a message with level INFO on the 'vs_manage' logger."""
         self.logger.info(message, **kwargs)
 
     def warning(self, message: str, **kwargs):
-        """Log a WARNING level message."""
+        """Logs a message with level WARNING on the 'vs_manage' logger."""
         self.logger.warning(message, **kwargs)
 
     def error(self, message: str, exc_info=False, **kwargs):
-        """Log an ERROR level message.
+        """Logs a message with level ERROR on the 'vs_manage' logger.
 
         Args:
-            message: The error message.
-            exc_info: If True, include exception information in the log.
-            **kwargs: Additional arguments for the logger.
+            message: The error message string.
+            exc_info (bool): If True, exception information is added to the log message.
+                            Defaults to False.
+            **kwargs: Additional keyword arguments for the logger.
         """
         self.logger.error(message, exc_info=exc_info, **kwargs)
 
     def exception(self, message: str, **kwargs):
-        """Log an ERROR level message with exception information included."""
-        # This is equivalent to self.error(message, exc_info=True)
+        """Logs a message with level ERROR on the 'vs_manage' logger, including exception info.
+
+        This is a convenience method equivalent to calling `error` with `exc_info=True`.
+
+        Args:
+            message: The error message string.
+            **kwargs: Additional keyword arguments for the logger.
+        """
         self.logger.exception(message, **kwargs)
 
     def critical(self, message: str, **kwargs):
-        """Log a CRITICAL level message."""
+        """Logs a message with level CRITICAL on the 'vs_manage' logger."""
         self.logger.critical(message, **kwargs)
